@@ -306,4 +306,4 @@ https://polyformproject.org/licenses/noncommercial/1.0.0/
 
 ## Author
 
-[Add author information here]
+George Andreou
