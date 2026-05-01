@@ -1,0 +1,113 @@
+
+{
+	# We're behind no automatic TLS — TLS termination, if any,
+	# happens at an upstream proxy (Cloudflare Tunnel / tailscale serve).
+	auto_https off
+	admin off
+
+	# Trust X-Forwarded-* headers when the immediate hop is from a private
+	# range (loopback, docker bridge, RFC1918). Without this Caddy strips
+	# the chain even from a trusted local proxy like `tailscale serve`,
+	# so the API only ever sees the docker bridge IP — not the tailnet
+	# client. private_ranges is Caddy's named matcher; safe because
+	# external attackers can never originate from these ranges.
+	servers {
+		trusted_proxies static private_ranges
+	}
+}
+
+# Liveness endpoint — answered by Caddy itself, no upstream involved.
+# Mounted on both listeners so docker healthcheck can probe either.
+(healthz) {
+	handle /healthz {
+		respond "OK" 200 {
+			close
+		}
+	}
+}
+
+# Shared upstream routing
+(routes) {
+	# REST API and static music streaming go straight to the NestJS service.
+	handle /api/* {
+		reverse_proxy api:3001
+	}
+	# Long-form audio streaming. flush_interval -1 disables Caddy buffering so
+	# bytes leave the proxy as soon as Express writes them; zero read/write
+	# timeouts let a single socket carry a multi-hour download or stay idle
+	# between Range chunks. Stripping Accept-Encoding prevents any future
+	# upstream middleware from gzipping (incompressible) audio.
+	handle /music/* {
+		reverse_proxy api:3001 {
+			flush_interval -1
+			transport http {
+				read_timeout 0
+				write_timeout 0
+				dial_timeout 10s
+				response_header_timeout 30s
+				keepalive 2m
+				keepalive_idle_conns 64
+			}
+			header_up -Accept-Encoding
+		}
+	}
+	# Everything else is the Next.js app.
+	handle {
+		reverse_proxy web:3000
+	}
+}
+
+# Structured JSON logging for both listeners.
+# Healthz hits are noisy, so we filter them out at log time.
+(logging) {
+	log {
+		output stdout
+		format json
+		level INFO
+	}
+	log_skip /healthz
+}
+
+# ── Public listener ───────────────────────────────────────────────
+:8080 {
+	import logging
+	import healthz
+
+	# Block the admin Next.js page (/admin and any subpath)
+	@adminWeb path /admin /admin/*
+	handle @adminWeb {
+		respond "Not Found" 404
+	}
+
+	# Block every admin API endpoint. /api/admin/token also serves
+	# CSRF tokens, so it's covered by the same matcher.
+	@adminApi path /api/admin /api/admin/*
+	handle @adminApi {
+		respond "Not Found" 404
+	}
+
+	# Swagger UI exposes the full API schema. Reachable only via the
+	# admin listener (IP-allowlisted) so an accidental SWAGGER_ENABLED=true
+	# in prod doesn't leak the schema publicly.
+	@swaggerDocs path /api/docs /api/docs/* /api/docs-json
+	handle @swaggerDocs {
+		respond "Not Found" 404
+	}
+
+	import routes
+}
+
+# ── Admin listener ────────────────────────────────────────────────
+# Reachable on whatever interface docker-compose binds :9000 to. The
+# API's IpWhitelistGuard is the gate here — it reads the real client IP
+# from X-Forwarded-For (which Caddy appends automatically) and checks
+# against ADMIN_IPS in .env. No special header magic.
+:9000 {
+	import logging
+	import healthz
+
+	# Root lands on the admin panel — this listener exists for admin use.
+	redir / /admin 302
+
+	import routes
+}

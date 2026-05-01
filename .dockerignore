@@ -1,0 +1,17 @@
+.env
+**/.git
+**/.next
+**/node_modules
+**/dist
+**/coverage
+**/.turbo
+**/test-results
+**/playwright-report
+
+# Runtime-only — bind-mounted by docker-compose, never copied into images
+data
+caddy
+host_nginx.conf
+
+# Local docs / planning notes
+*.md

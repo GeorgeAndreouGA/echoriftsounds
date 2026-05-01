@@ -1,309 +1,245 @@
-# EchoRiftSounds 🎵
+# EchoRiftSounds
 
-A retro-styled music streaming and sharing web application built with Node.js and Express, featuring a cyberpunk aesthetic with scheduled track releases and a secure admin panel.
+Self-hosted audio library and streaming site. Long-form audio (multi-hour mixes) is served over HTTP Range from disk, with a CRT-terminal-themed web UI and an admin panel for publishing / scheduling tracks.
 
-## Features
+## Stack
 
-- **Retro Cyberpunk UI** - Beautiful neon-styled interface with the Orbitron font and animated effects
-- **Music Streaming** - Stream MP3, WAV, and FLAC audio files directly from the browser
-- **Scheduled Releases** - Schedule tracks to be published at a specific date and time
-- **Admin Panel** - Secure admin interface for managing published and scheduled tracks
-- **Docker Support** - Fully containerized with Docker and PM2 cluster mode
-- **Security Hardened** - Rate limiting, CSRF protection, IP whitelisting, Helmet.js headers, and bcrypt password hashing
+- **Monorepo:** pnpm workspaces
+- **Backend:** NestJS 11 (TypeScript) — internal port `3001`
+- **Frontend:** Next.js 15 + React 19 + Tailwind 4 — internal port `3000`
+- **Storage:** JSON files on disk (no database). Music files live on a bind-mounted directory and are served read-only.
+- **Audio tooling:** `ffmpeg` (waveform peak generation), `wavesurfer.js` (frontend rendering)
+- **Reverse proxy:** Caddy (in-compose) behind optional host nginx for TLS
 
-## Tech Stack
+## Architecture
 
-- **Backend**: Node.js, Express 5
-- **Process Manager**: PM2 (cluster mode)
-- **Containerization**: Docker & Docker Compose
-- **Security**: Helmet.js, express-rate-limit, csurf, bcrypt, express-basic-auth
-- **Frontend**: Vanilla HTML/CSS/JavaScript with retro styling
-
-## Project Structure
+Layered defense-in-depth — two completely separate ingress paths. The public path is internet-facing with TLS; the admin path is **VPN-only** (Tailscale / WireGuard) on a private high port, also with TLS layered on top of the VPN's transport encryption (independent crypto — a misconfigured VPN won't drop admin to plain HTTP). Admin endpoints are blocked at *every* layer of the public path so nothing relies on a single fence. `api` and `web` never bind to the host — all traffic must traverse Caddy.
 
 ```
-echoriftsounds/
-├── generate-hash.js          # Utility to generate bcrypt password hashes
-├── README.md
-└── source_code/
-    ├── docker-compose.yml    # Docker Compose configuration
-    ├── Dockerfile            # Multi-stage Docker build
-    ├── ecosystem.config.js   # PM2 cluster configuration
-    ├── package.json          # Node.js dependencies
-    ├── published.json        # List of published tracks
-    ├── scheduled.json        # List of scheduled track releases
-    ├── server.js             # Express server application
-    └── html/
-        ├── admin.html        # Admin panel interface
-        └── index.html        # Public music player interface
+       Internet / LAN                                  VPN (Tailscale / WireGuard)
+            │                                                       │
+   echorift.example.com :443                                         │
+            ▼                                                       ▼
+   ┌──────────────────────┐                          ┌──────────────────────────┐
+   │  nginx :443 (public) │                          │  nginx :9443 (admin)     │
+   │  TLS + sec headers   │                          │  TLS + IP allow          │
+   │                      │                          │  + login rate-limit      │
+   └──────────┬───────────┘                          │  (firewall: VPN-only)    │
+              │                                      └──────────────┬───────────┘
+              ▼                                                     ▼
+   ┌──────────────────────┐                          ┌──────────────────────────┐
+   │ Caddy public  :8087  │                          │ Caddy admin  :9000       │
+   │ → :8080 in container │                          │                          │
+   │ blocks /admin*       │                          │ forwards everything;     │
+   │ blocks /api/admin*   │                          │ root → /admin redirect   │
+   │ blocks /api/docs*    │                          │                          │
+   └──────────┬───────────┘                          └──────────────┬───────────┘
+              │                                                     │
+              └─────────────────────────┬───────────────────────────┘
+                                        │ docker network only — no host binding
+                       ┌────────────────┴───────────────┐
+                       ▼                                ▼
+                ┌─────────────────┐              ┌─────────────────┐
+                │  web  :3000     │              │  api  :3001     │
+                │  Next.js        │              │  NestJS         │
+                │  public site    │              │  /api/tracks    │
+                │  + admin panel  │              │  /api/admin     │
+                └─────────────────┘              │  /api/docs      │
+                                                 │  /music/*       │
+                                                 │  scheduler 30s  │
+                                                 └────────┬────────┘
+                                                          │
+                          ┌───────────────────────────────┼──────────────────┐
+                          ▼                               ▼                  ▼
+                  /app/data (JSON)               /app/music (RO)     /app/data/peaks
+                  published.json                 bind-mounted         ffmpeg cache
+                  scheduled.json                 audio source
 ```
 
-## Prerequisites
+**Why a separate admin port with its own TLS cert?** Public TLS at `:443` and admin TLS at `:9443` are physically separate listeners with separate certs, so a misconfigured public vhost cannot accidentally serve admin paths. The admin cert is either Tailscale-issued (real LE, valid only inside the tailnet) or self-signed (warns once, can be imported into the device trust store). TLS *and* VPN are independent layers — if one fails, the other still encrypts.
 
-- Docker & Docker Compose
-- Node.js 18+ (for local development)
-- A directory containing your music files (MP3, WAV, FLAC)
+**Why does the API still enforce its own IP allowlist?** Defense in depth — nginx only guards the admin vhost. If something reaches `api:3001` from inside the docker network (e.g. a compromised neighbor container), `IpWhitelistGuard` is the last fence.
 
-## Installation
+> **Hardening note:** Caddy's admin listener is published as `9000:9000` in `docker-compose.yml`, which binds to all host interfaces. For VPN-only admin, change this to `"127.0.0.1:9000:9000"` so the only path into Caddy admin is via nginx on `:9443`. (Not changed by default to keep dev probing easy.)
 
-### 1. Clone the Repository
+## Layout
 
-```bash
-git clone <repository-url>
-cd echoriftsounds
 ```
-
-### 2. Generate Admin Password Hash
-
-```bash
-cd source_code
-npm install bcrypt
+apps/
+  api/                NestJS — REST + static music streaming
+    src/
+      tracks/         Public endpoints (track list, peaks)
+      admin/          Admin endpoints (auth, publish, schedule)
+      scheduler/      Cron — promotes scheduled tracks every 30s
+      storage/        JSON-file persistence
+      auth/           Basic-auth, session, IP-allowlist, CSRF guards
+  web/                Next.js — public site + admin panel
+packages/
+  shared/             Types + Zod schemas shared between api and web
+caddy/Caddyfile       In-compose reverse proxy (public + admin listeners)
+host_nginx.conf       Optional host-level TLS terminator
+docker-compose.yml    Production deployment
 ```
-
-Edit `generate-hash.js` and set your desired password:
-
-```javascript
-const password = 'yourStrongPasswordHere';
-```
-
-Run the script:
-
-```bash
-node ../generate-hash.js
-```
-
-Copy the generated hash for the next step.
-
-### 3. Configure Environment Variables
-
-Create a `.env` file in the `source_code` directory:
-
-```env
-# Admin Credentials
-ADMIN_USERNAME=admin
-ADMIN_PASSWORD_HASH=$2b$12$your_generated_hash_here
-
-# Admin IP Whitelist (comma-separated, supports CIDR notation)
-ADMIN_IPS=192.168.1.0/24,10.0.0.0/8
-
-# Site Configuration
-SITE_NAME=EchoRiftSounds
-YOUTUBE_URL=https://youtube.com/@yourchannel
-
-# Security
-COOKIE_SECRET=your_random_secret_here
-NODE_ENV=production
-```
-
-### 4. Configure Docker Compose
-
-Edit `docker-compose.yml` to point to your music directory:
-
-```yaml
-volumes:
-  - /path/to/your/music:/app/music:ro
-```
-
-### 5. Build and Run
-
-```bash
-cd source_code
-docker-compose up -d --build
-```
-
-The application will be available at `http://localhost:3000`.
-
-## Configuration
-
-### Environment Variables
-
-| Variable | Description | Required |
-|----------|-------------|----------|
-| `ADMIN_USERNAME` | Admin panel username | Yes |
-| `ADMIN_PASSWORD_HASH` | Bcrypt hash of admin password | Yes |
-| `ADMIN_IPS` | Comma-separated list of allowed admin IPs (CIDR supported) | Yes |
-| `SITE_NAME` | Name displayed on the public interface | Yes |
-| `YOUTUBE_URL` | YouTube channel link (optional) | No |
-| `COOKIE_SECRET` | Secret for cookie signing | Recommended |
-| `NODE_ENV` | Set to `production` for secure cookies | Recommended |
-
-### File Permissions
-
-Ensure correct permissions for both host and container:
-
-- **Directories**: `755`
-- **Files**: `644`
-
-```bash
-chmod 755 source_code source_code/html
-chmod 644 source_code/*.json source_code/html/*.html
-```
-
-## Usage
-
-### Public Interface
-
-- Access the music player at `http://your-domain/` or `http://your-domain/index`
-- Browse and stream published tracks
-- Download tracks directly
-- Search through available music
-
-### Admin Panel
-
-- Access the admin panel at `http://your-domain/admin`
-- **Note**: Admin access is restricted by IP whitelist
-- Authenticate with your configured credentials
-
-#### Admin Features
-
-1. **Publish Tracks** - Immediately make tracks available to the public
-2. **Schedule Tracks** - Set a future date/time for automatic release
-3. **Unpublish Tracks** - Remove tracks from the public listing
-4. **Cancel Scheduled Releases** - Remove pending scheduled tracks
-
-### Accessing Admin Panel
-
-By default, the `/admin` endpoint is accessible from the internet (protected by IP whitelisting, rate limiting, and authentication in the app itself).
-
-However, the **recommended production setup** uses the provided nginx configuration to isolate the admin panel on a **separate port (3003)**, adding an extra layer of security:
-
-#### With Nginx Config (Recommended)
-
-The nginx config uses two server blocks:
-- **Port 443** - Public interface (`/index`, `/music/`, `/published`) - exposed to the internet
-- **Port 3003** - Admin interface (`/admin`, `/scheduled`) - restricted with nginx IP whitelist
-
-This provides multiple layers of security:
-
-1. **Nginx IP Whitelisting** - Only allowed IPs can reach the admin port
-2. **Application IP Whitelisting** - Second layer of IP checking in the Node.js app
-3. **Rate Limiting** - 5 attempts per 5 minutes
-4. **Basic Auth with bcrypt** - Password hashing with salt rounds of 12
-5. **CSRF Protection** - All form submissions require valid tokens
-
-To access the admin panel:
-1. Ensure your IP is in the nginx `allow` list
-2. Ensure your IP is in the `ADMIN_IPS` environment variable
-3. Navigate to `https://your-domain:3003/admin`
-
-#### Without Nginx Config (Direct Access)
-
-If you're not using the provided nginx config, the admin panel is accessible directly at `https://your-domain/admin`. It's still protected by:
-- Application-level IP whitelisting (`ADMIN_IPS`)
-- Rate limiting
-- Basic authentication with bcrypt
-- CSRF protection
-
-This is less secure than the nginx setup but still functional for testing or simple deployments.
-
-#### Remote Access Options
-
-If accessing from outside your whitelisted network:
-
-1. **VPN** (Recommended): Connect to your home/server VPN, then access admin using your VPN IP
-2. **Local DNS / Pi-hole**: Configure your local DNS to resolve the domain
-3. **Edit `/etc/hosts`**: Add the server IP to your hosts file
-
-**Note**: If using `/etc/hosts`, remember to remove the entry when accessing the public interface from outside your network.
-
-## Security Features
-
-- **Rate Limiting**: 5 attempts per 5 minutes on admin routes
-- **IP Whitelisting**: Admin panel restricted to configured IPs
-- **CSRF Protection**: All admin form submissions protected
-- **Secure Headers**: Helmet.js with strict CSP
-- **Password Hashing**: bcrypt with salt rounds of 12
-- **Input Validation**: Filename and path traversal protection
-- **Non-root Container**: Docker runs as unprivileged user
 
 ## Development
 
-### Local Development
+Runs the API and web app directly on the host (no Docker, no Caddy in front), so you hit each service on its native port.
 
 ```bash
-cd source_code
-npm install
-node server.js
+pnpm install
+pnpm dev        # runs api (3001) + web (3000) concurrently
 ```
 
-### PM2 Commands (inside container)
+Visit:
+- `http://localhost:3000` — public site
+- `http://localhost:3000/admin` — admin panel
+- `http://localhost:3001/api/docs` — Swagger UI (requires `SWAGGER_ENABLED=true`)
+
+## Production (Docker Compose)
 
 ```bash
-# View cluster status
-docker exec echoriftsounds-app pm2 status
-
-# View logs
-docker exec echoriftsounds-app pm2 logs
-
-# Restart cluster
-docker exec echoriftsounds-app pm2 restart all
+docker compose up --build -d
 ```
 
-## API Endpoints
+Three containers come up; **only Caddy publishes to the host**:
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/` | GET | Redirect to `/index` |
-| `/index` | GET | Public music player |
-| `/music/:file` | GET | Stream/download audio file |
-| `/published.json` | GET | List of published tracks |
-| `/scheduled.json` | GET | List of scheduled tracks |
-| `/admin` | GET | Admin panel (protected) |
-| `/admin/files` | GET | List all available files |
-| `/admin/publish` | POST | Publish/schedule tracks |
-| `/admin/delete` | POST | Unpublish tracks |
-| `/admin/scheduled/delete` | POST | Cancel scheduled releases |
-| `/admin/token` | GET | Refresh CSRF token |
+| Service  | Internal port | Host port      | Role                                  |
+|----------|---------------|----------------|---------------------------------------|
+| `api`    | 3001          | —              | NestJS app (docker network only)      |
+| `web`    | 3000          | —              | Next.js app (docker network only)     |
+| `caddy`  | 8080, 9000    | **8087, 9000** | Public + admin reverse proxy          |
 
-## Supported Audio Formats
+Plus host nginx (running outside Docker, config in `host_nginx.conf`):
 
-- MP3 (`.mp3`)
-- WAV (`.wav`)
-- FLAC (`.flac`)
+| Listener         | Port | Routed to              | Reachable from       |
+|------------------|------|------------------------|----------------------|
+| Public (TLS, LE) | 443  | `127.0.0.1:8087` (Caddy public) | Internet            |
+| Admin (TLS, self-signed or Tailscale) | 9443 | `127.0.0.1:9000` (Caddy admin)  | **VPN interface only** |
+| HTTP redirect    | 80   | → 443                  | Internet            |
 
-## Troubleshooting
+Reachable URLs:
+- `https://echorift.example.com` — public site (admin paths and `/api/docs*` blocked at the proxy)
+- `https://<vpn-host>:9443/admin` — admin panel, only over Tailscale / WireGuard
 
-### Admin panel returns 403 Forbidden
+Before nginx will start, the admin cert and key must exist at the paths declared in `host_nginx.conf` (`/etc/nginx/admin-selfsigned.{crt,key}` by default). See [Admin TLS cert](#admin-tls-cert) below.
 
-Your IP is not in the `ADMIN_IPS` whitelist. Check your current IP and update the environment variable.
+The host firewall must drop traffic on `:9443` from every non-VPN interface — that's the outermost fence.
 
-### Scheduled tracks not releasing
+## Admin TLS cert
 
-The scheduled release check runs on every request. If there's no traffic, tracks won't release automatically. Consider adding a health check or cron job to trigger releases.
+Two practical options for the admin listener cert:
 
-### Container permission issues
-
-Ensure the music directory is readable by UID 1001:
+**A) Tailscale-issued Let's Encrypt cert (recommended — no browser warnings)**
 
 ```bash
-chown -R 1001:1001 /path/to/music
-# or
-chmod -R 755 /path/to/music
+# On the host. Replace <host>.<tailnet>.ts.net with your tailnet hostname.
+sudo tailscale cert <host>.<tailnet>.ts.net
+sudo mv <host>.<tailnet>.ts.net.crt /etc/nginx/admin-selfsigned.crt
+sudo mv <host>.<tailnet>.ts.net.key /etc/nginx/admin-selfsigned.key
+sudo systemctl reload nginx
 ```
 
-## License
+The cert is auto-renewable (re-run `tailscale cert` from a cron, or use `tailscale serve` to have it managed for you). Valid only inside the tailnet — the hostname doesn't resolve outside.
 
-This project is licensed under the **PolyForm Noncommercial License 1.0.0**.
+**B) Self-signed (works anywhere, browser warns once per device)**
 
-### You CAN:
--  Use for personal, non-commercial projects
--  Study, modify, and improve the code
--  Distribute copies with your changes
--  Use for educational or research purposes
--  Use in nonprofit organizations
+```bash
+sudo openssl req -x509 -newkey rsa:2048 -nodes -days 825 \
+  -keyout /etc/nginx/admin-selfsigned.key \
+  -out    /etc/nginx/admin-selfsigned.crt \
+  -subj   "/CN=echorift-admin"
+sudo chmod 600 /etc/nginx/admin-selfsigned.key
+sudo systemctl reload nginx
+```
 
-### You CANNOT:
--  Use for commercial purposes
--  Sell the software or derivatives
--  Use to provide commercial services
--  Deploy for business profit
+Optional: import the `.crt` into your admin device's OS trust store to silence the warning permanently.
 
-### Contributions Welcome
-Improvements, bug fixes, and new features are encouraged! Please submit contributions back to the original project so everyone can benefit.
+`api` and `web` are intentionally not published to the host — every request flows through Caddy. The two Caddy listeners aren't redundancy; they're a privilege boundary. See the [Architecture](#architecture) section.
 
-See the [LICENSE](LICENSE) file for full details or visit:
-https://polyformproject.org/licenses/noncommercial/1.0.0/
+## Common Docker commands
 
-## Author
+```bash
+# Bring up the full stack (rebuild changed images, run detached).
+docker compose up --build -d
 
-George Andreou
+# Tail logs from one service (Ctrl-C exits, container keeps running).
+docker compose logs -f api
+docker compose logs -f caddy
+
+# Restart a single service after a config-only change.
+# Caddy's admin API is disabled (`admin off` in the Caddyfile globals),
+# so `caddy reload` won't work — restart the container instead.
+docker compose restart caddy
+
+# Rebuild + replace a single service after a code change.
+docker compose up --build api -d
+
+# Open a shell in a running container for poking around.
+docker compose exec api sh
+docker compose exec caddy sh
+
+# Inspect ports and networks.
+docker compose ps
+docker compose port caddy 8080      # → host port mapped to caddy:8080
+
+# Stop everything (containers only — bind-mounted data and volumes persist).
+docker compose down
+
+# Tear down and also remove the named volumes (caddy-data, caddy-config).
+# Bind-mounted ./data is NOT touched.
+docker compose down -v
+```
+
+## Environment variables
+
+Defined in `.env` at repo root (loaded via `env_file` in `docker-compose.yml`).
+
+| Variable | Purpose |
+|----------|---------|
+| `ADMIN_USERNAME` / `ADMIN_PASSWORD_HASH` | Basic-auth credentials. Hash with bcrypt (cost 12). |
+| `ADMIN_IPS` | Comma-separated CIDR/IP allowlist for admin endpoints (matched in `IpWhitelistGuard`). |
+| `COOKIE_SECRET` | Signs session + CSRF cookies. Required; rotate to invalidate all sessions. |
+| `WEB_ORIGIN` | CORS origin for the API. |
+| `API_INTERNAL_URL` | Server-side URL the web app uses to reach the API (`http://api:3001` in compose). |
+| `SWAGGER_ENABLED` | `true` mounts Swagger UI at `/api/docs`. Default off — keep off in production. |
+| `SITE_NAME` / `YOUTUBE_URL` / `INSTAGRAM_URL` / `FACEBOOK_URL` | Branding + footer links. |
+
+> Storage paths (`/app/data`, `/app/music`) aren't configurable via `.env` — they're baked into the image and the bind mounts in `docker-compose.yml`. To point at a different music source, edit the `volumes:` entry under the `api` service.
+
+## API documentation
+
+When `SWAGGER_ENABLED=true`, an interactive OpenAPI UI is available at `/api/docs`.
+
+In production, `/api/docs` and `/api/docs-json` are blocked at the public Caddy listener — they're only reachable via the admin listener, which is itself reachable only over the VPN. Even if the env var is accidentally left on in production, the schema can't leak to the public internet.
+
+All public endpoints are under `/api/tracks`. Admin endpoints are under `/api/admin` and require:
+- IP allowlist match (`IpWhitelistGuard`)
+- Signed session cookie (`SessionGuard`, set by `POST /api/admin/login`)
+- CSRF token in `X-CSRF-Token` header for unsafe methods
+
+## Security model
+
+- **Defense in depth:** host firewall → host nginx (TLS) → Caddy → NestJS guards. Admin-only paths are blocked at *every* layer, not just the innermost.
+- **Admin transport:** VPN-only (Tailscale / WireGuard) **plus** independent TLS at nginx on `:9443`. Two crypto layers — a misconfigured VPN won't drop admin to plain HTTP.
+- **Strict CSP** via Helmet (script-src `'self'`, no inline). Relaxed only on `/api/docs` when Swagger is enabled.
+- **Rate limiting:** 100 req/min globally; login endpoint locked to 5 attempts per 5 min with deterministic `Retry-After`. nginx adds an extra 10 r/m perimeter cap on `/api/admin/login`.
+- **Session cookies:** `httpOnly`, `signed`, `sameSite=strict`, scoped to `/api/admin`, `secure` derived from `req.secure`. Both nginx vhosts terminate TLS, so the cookie is always issued with the `Secure` flag.
+- **Music streaming:** static `serve-static` with HTTP Range, immutable cache, long keep-alive (75s) for multi-hour single-socket downloads.
+
+## Scripts
+
+From repo root:
+
+```bash
+pnpm build      # builds all workspaces
+pnpm lint       # lints all workspaces
+pnpm dev        # runs api + web in watch mode
+```
+
+Per-workspace:
+
+```bash
+pnpm --filter @echorift/api dev
+pnpm --filter @echorift/web dev
+pnpm --filter @echorift/shared build
+```

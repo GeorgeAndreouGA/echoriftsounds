@@ -1,0 +1,615 @@
+@import "tailwindcss";
+
+@theme {
+  --color-crt-bg: #0a0b06;
+  --color-crt-panel: #11140c;
+  --color-crt-grid: #1a1f12;
+  --color-phosphor: #ffb000;
+  --color-phosphor-dim: #8a5f00;
+  --color-phosphor-hi: #ffd96b;
+  --color-signal-green: #39ff14;
+  --color-signal-red: #ff3b3b;
+  --color-signal-cyan: #22d3ee;
+
+  --font-mono: 'JetBrains Mono', 'IBM Plex Mono', ui-monospace, monospace;
+
+  --spacing-grid: 4px;
+}
+
+/* ── Reduced-motion guard ─────────────────────────────────────── */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* ── Base ─────────────────────────────────────────────────────── */
+@layer base {
+  *, *::before, *::after {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+  }
+
+  html, body {
+    overflow-x: hidden;
+  }
+
+  body {
+    font-family: 'IBM Plex Mono', 'JetBrains Mono', ui-monospace, monospace;
+    background: #0a0b06;
+    color: #ffb000;
+    min-height: 100vh;
+    font-size: 13px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  ::selection {
+    background: #ffb000;
+    color: #0a0b06;
+  }
+
+  :focus-visible {
+    outline: 2px solid #ffb000;
+    outline-offset: 2px;
+  }
+
+  a {
+    color: #ffb000;
+    text-decoration: none;
+  }
+
+  a:hover {
+    color: #ffd96b;
+  }
+
+  h1, h2, h3 {
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    color: #ffb000;
+  }
+}
+
+/* ── Components ───────────────────────────────────────────────── */
+@layer components {
+
+  /* Core panel */
+  .crt-panel {
+    background: #11140c;
+    border: 1px solid #ffb000;
+    border-radius: 0;
+    padding: 1rem;
+    position: relative;
+  }
+
+  .crt-panel-dim {
+    background: #11140c;
+    border: 1px solid #8a5f00;
+    border-radius: 0;
+    padding: 1rem;
+    position: relative;
+  }
+
+  /* Buttons */
+  .crt-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.5rem 1rem;
+    background: transparent;
+    color: #ffb000;
+    border: 1px solid #ffb000;
+    border-radius: 0;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    cursor: pointer;
+    text-transform: uppercase;
+    transition: background 0.1s, color 0.1s, box-shadow 0.1s;
+    white-space: nowrap;
+    text-decoration: none;
+  }
+  .crt-btn:hover:not(:disabled) {
+    background: #ffb000;
+    color: #0a0b06;
+    box-shadow: 0 0 8px rgba(255,176,0,0.4);
+  }
+  .crt-btn:active:not(:disabled) {
+    transform: translateY(1px);
+  }
+  .crt-btn:disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
+  }
+  .crt-btn.danger {
+    border-color: #ff3b3b;
+    color: #ff3b3b;
+  }
+  .crt-btn.danger:hover:not(:disabled) {
+    background: #ff3b3b;
+    color: #0a0b06;
+    box-shadow: 0 0 8px rgba(255,59,59,0.4);
+  }
+  .crt-btn.small {
+    padding: 0.3rem 0.6rem;
+    font-size: 10px;
+  }
+
+  /* Inputs */
+  .crt-input {
+    width: 100%;
+    padding: 0.5rem 0.75rem;
+    background: #0a0b06;
+    border: 1px solid #8a5f00;
+    border-radius: 0;
+    color: #ffb000;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 13px;
+    font-size: max(13px, 16px); /* prevent iOS zoom */
+    outline: none;
+    transition: border-color 0.15s, box-shadow 0.15s;
+    caret-color: #ffb000;
+  }
+  .crt-input:focus {
+    border-color: #ffb000;
+    box-shadow: 0 0 6px rgba(255,176,0,0.25);
+  }
+  .crt-input::placeholder {
+    color: #8a5f00;
+  }
+
+  /* Blinking cursor */
+  .crt-cursor::after {
+    content: '▮';
+    color: #ffb000;
+    animation: blink 1s step-start infinite;
+  }
+
+  /* Hairline divider */
+  .crt-divider {
+    border: none;
+    border-top: 1px solid #1a1f12;
+    margin: 0;
+  }
+
+  /* Page container */
+  .crt-container {
+    width: 100%;
+    max-width: 960px;
+    margin: 0 auto;
+    padding: 1.5rem 1rem;
+  }
+
+  /* Status indicator */
+  .crt-status-dot {
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: #39ff14;
+    box-shadow: 0 0 4px #39ff14;
+    animation: pulse-dot 2s ease-in-out infinite;
+  }
+
+  /* Track row */
+  .track-row {
+    display: flex;
+    align-items: center;
+    gap: 0;
+    padding: 0.5rem 0.75rem;
+    border-bottom: 1px solid #1a1f12;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+    transition: background 0.1s;
+    cursor: pointer;
+    position: relative;
+  }
+  .track-row:hover {
+    background: rgba(255,176,0,0.04);
+  }
+  .track-row::after {
+    content: '';
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    height: 1px;
+    width: 0;
+    background: #ffb000;
+    transition: width 0.25s ease;
+  }
+  .track-row:hover::after {
+    width: 100%;
+  }
+
+  /* Admin table */
+  .crt-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+    font-family: 'JetBrains Mono', monospace;
+  }
+  .crt-table th {
+    text-align: left;
+    color: #8a5f00;
+    font-size: 11px;
+    padding: 0.4rem 0.6rem;
+    border-bottom: 1px solid #1a1f12;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+  }
+  .crt-table td {
+    padding: 0.5rem 0.6rem;
+    border-bottom: 1px solid #1a1f12;
+    color: #ffb000;
+    vertical-align: middle;
+  }
+  .crt-table tr:hover td {
+    background: rgba(255,176,0,0.03);
+  }
+
+  /* File list scroll area */
+  .crt-file-list {
+    max-height: 260px;
+    overflow-y: auto;
+    border: 1px solid #1a1f12;
+    scrollbar-width: thin;
+    scrollbar-color: #8a5f00 #0a0b06;
+  }
+  .crt-file-list::-webkit-scrollbar {
+    width: 4px;
+  }
+  .crt-file-list::-webkit-scrollbar-track {
+    background: #0a0b06;
+  }
+  .crt-file-list::-webkit-scrollbar-thumb {
+    background: #8a5f00;
+  }
+
+  /* Error / status text */
+  .crt-error {
+    color: #ff3b3b;
+    font-size: 11px;
+    font-family: 'JetBrains Mono', monospace;
+    padding: 0.25rem 0;
+  }
+  .crt-muted {
+    color: #8a5f00;
+  }
+
+  /* Section title */
+  .crt-section-title {
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+    color: #8a5f00;
+    text-transform: uppercase;
+    padding-bottom: 0.5rem;
+    margin-bottom: 0.75rem;
+    border-bottom: 1px solid #1a1f12;
+  }
+
+  /* Player frame */
+  .crt-player-frame {
+    border: 1px solid #ffb000;
+    background: #11140c;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+  }
+  .crt-player-header {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.4rem 0.75rem;
+    border-bottom: 1px solid #8a5f00;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    color: #ffb000;
+    background: #0a0b06;
+  }
+  .crt-player-waveform {
+    padding: 0.5rem 0.75rem 0;
+  }
+  .crt-player-timecode {
+    text-align: center;
+    padding: 0.25rem;
+    font-size: 11px;
+    color: #8a5f00;
+    letter-spacing: 0.1em;
+  }
+  .crt-player-controls {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    padding: 0.5rem 0.75rem;
+    border-top: 1px solid #1a1f12;
+    flex-wrap: wrap;
+  }
+  .ctrl-group {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+  }
+
+  /* Bar chart chars */
+  .bar-chart {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+    color: #ffb000;
+    letter-spacing: -0.05em;
+  }
+
+  /* CRT scanlines + ambient — applied inside CrtShell */
+  .scanlines {
+    position: fixed;
+    inset: 0;
+    z-index: 9998;
+    pointer-events: none;
+    background: repeating-linear-gradient(
+      0deg,
+      transparent,
+      transparent 2px,
+      rgba(0, 0, 0, 0.18) 2px,
+      rgba(0, 0, 0, 0.18) 4px
+    );
+    animation: scanline-drift 8s linear infinite;
+    will-change: background-position;
+  }
+
+  .vignette {
+    position: fixed;
+    inset: 0;
+    z-index: 9997;
+    pointer-events: none;
+    background: radial-gradient(
+      ellipse at center,
+      transparent 55%,
+      rgba(0, 0, 0, 0.65) 100%
+    );
+  }
+
+  .flicker-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 9999;
+    pointer-events: none;
+    background: rgba(255, 176, 0, 0.025);
+    animation: flicker 4s step-start infinite;
+    will-change: opacity;
+  }
+}
+
+/* ── Keyframes ────────────────────────────────────────────────── */
+@keyframes flicker {
+  0%   { opacity: 0; }
+  4%   { opacity: 1; }
+  5%   { opacity: 0; }
+  15%  { opacity: 0; }
+  16%  { opacity: 1; }
+  17%  { opacity: 0; }
+  70%  { opacity: 0; }
+  71%  { opacity: 1; }
+  73%  { opacity: 0; }
+  100% { opacity: 0; }
+}
+
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0; }
+}
+
+@keyframes scanline-drift {
+  0%   { background-position: 0 0; }
+  100% { background-position: 0 4px; }
+}
+
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; box-shadow: 0 0 4px #39ff14; }
+  50%       { opacity: 0.4; box-shadow: 0 0 2px #39ff14; }
+}
+
+@keyframes amber-pulse {
+  0%, 100% { box-shadow: 0 0 6px rgba(255,176,0,0.3); }
+  50%       { box-shadow: 0 0 16px rgba(255,176,0,0.7); }
+}
+
+@keyframes type-scan-in {
+  0%   { clip-path: inset(0 100% 0 0); opacity: 0; }
+  5%   { opacity: 1; }
+  100% { clip-path: inset(0 0% 0 0); opacity: 1; }
+}
+
+@keyframes chromatic-pulse {
+  0%, 100% { text-shadow: none; }
+  50%       { text-shadow: 1px 0 #22d3ee, -1px 0 #ff3b3b; }
+}
+
+@keyframes shake {
+  0%, 100% { transform: translateX(0); }
+  10%, 50%, 90% { transform: translateX(-4px); }
+  30%, 70% { transform: translateX(4px); }
+}
+
+@keyframes scan-beam {
+  0%   { transform: translateX(-100%); opacity: 0.6; }
+  100% { transform: translateX(400%); opacity: 0; }
+}
+
+@keyframes warmup {
+  0%   { opacity: 0; filter: brightness(0); }
+  30%  { opacity: 0.6; filter: brightness(0.4) saturate(2); }
+  70%  { opacity: 0.9; filter: brightness(0.85) saturate(1.2); }
+  100% { opacity: 1; filter: brightness(1) saturate(1); }
+}
+
+/* ── Save-Data mode ───────────────────────────────────────────── */
+/* Applied by JS when navigator.connection.saveData === true */
+html.save-data .scanlines {
+  animation: none;
+  background-position: 0 0;
+  will-change: auto;
+}
+html.save-data .flicker-overlay {
+  display: none;
+}
+html.save-data * {
+  animation-duration: 200ms !important;
+  animation-iteration-count: 1 !important;
+}
+html.save-data [style*="chromatic"],
+html.save-data [style*="text-shadow"] {
+  text-shadow: none !important;
+}
+
+/* ── Mobile FX tier ───────────────────────────────────────────── */
+/* Animations stay on; only the GPU-heavy filter chains are dropped. */
+@media (pointer: coarse) and (max-width: 768px) {
+  .crt-player-frame,
+  [data-fx="heavy"] {
+    filter: none !important;
+  }
+  .scanlines {
+    animation: none;
+    background-position: 0 0;
+    will-change: auto;
+  }
+  .flicker-overlay {
+    display: none;
+  }
+}
+
+/* iPhone notch / Android nav bar — pad in from safe-area insets when the
+   page is rendered with viewport-fit=cover. */
+.crt-safe-area {
+  padding-top: env(safe-area-inset-top);
+  padding-bottom: env(safe-area-inset-bottom);
+  padding-left: env(safe-area-inset-left);
+  padding-right: env(safe-area-inset-right);
+}
+
+/* ── Touch targets (WCAG 2.5.5 → 44px) ───────────────────────── */
+@media (pointer: coarse) {
+  .crt-btn {
+    min-height: 44px;
+    min-width: 44px;
+    padding: 0.6rem 1rem;
+  }
+  .crt-btn.small {
+    min-height: 40px;
+    padding: 0.5rem 0.8rem;
+    font-size: 11px;
+  }
+  [data-track-row] {
+    min-height: 56px;
+    padding: 0.75rem;
+  }
+}
+
+/* ── Responsive ───────────────────────────────────────────────── */
+@media (max-width: 640px) {
+  .crt-container {
+    padding: 1rem 0.75rem;
+  }
+  /* Single-row controls; distribute via space-between (desktop default) so wider
+     phones don't leave a big empty area on the right. */
+  .crt-player-controls {
+    gap: 0.3rem;
+    flex-wrap: nowrap;
+    padding: 0.5rem 0.4rem;
+  }
+  .ctrl-group {
+    gap: 0.2rem;
+    flex-wrap: nowrap;
+    flex-shrink: 0;
+  }
+  /* Waveform height 48px on mobile per spec */
+  .crt-player-waveform wave {
+    max-height: 48px !important;
+  }
+  /* 16px minimum on mobile prevents iOS zooming into inputs */
+  .crt-input,
+  input[type="search"],
+  input[type="text"] {
+    font-size: max(16px, 13px) !important;
+  }
+}
+
+/* Match DOWNLOAD button height/style to transport + LOOP buttons. */
+@media (max-width: 640px) {
+  .dl-btn {
+    font-size: 11px !important;
+    padding: 0.25rem 0.5rem !important;
+    min-height: 44px !important;
+    min-width: 0 !important;
+    line-height: 1 !important;
+    display: inline-flex !important;
+    align-items: center !important;
+    gap: 0.25rem;
+  }
+}
+
+/* At very narrow widths drop the DOWNLOAD word — icon only. */
+@media (max-width: 360px) {
+  .dl-btn .dl-text {
+    display: none;
+  }
+}
+
+/* ── Touch-friendly tap height (coarse pointer only, no layout change) ── */
+@media (pointer: coarse) {
+  .ctrl-btn {
+    min-height: 44px !important;
+    padding-top: 0.55rem !important;
+    padding-bottom: 0.55rem !important;
+  }
+}
+
+/* Social link bar — 3-column grid on narrow phones, flex on wider */
+.crt-social-bar {
+  margin-bottom: 1rem;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0.5rem;
+}
+@media (max-width: 480px) {
+  .crt-social-bar {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 0.4rem;
+    justify-items: center;
+  }
+}
+
+/* Hero: tighten padding + reduce gap between status items on narrow screens */
+@media (max-width: 480px) {
+  .hero-wordmark {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+  .hero-wordmark::-webkit-scrollbar {
+    display: none;
+  }
+}
+
+/* Admin tables: horizontal scroll on mobile */
+.crt-admin-table-wrap {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* ── Content visibility for offscreen rows ────────────────────── */
+@media (max-width: 768px) {
+  [data-track-row] {
+    content-visibility: auto;
+    contain-intrinsic-size: 0 56px;
+  }
+}
