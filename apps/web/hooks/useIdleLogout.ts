@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect } from 'react';
+import { withBase } from '../lib/api';
 
 export function useIdleLogout(ms: number, onIdle?: () => void | Promise<void>) {
   useEffect(() => {
@@ -8,7 +9,7 @@ export function useIdleLogout(ms: number, onIdle?: () => void | Promise<void>) {
 
     const fire = async () => {
       if (onIdle) await onIdle();
-      window.location.href = '/';
+      window.location.href = withBase('/');
     };
 
     const reset = () => {

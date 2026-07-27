@@ -1,22 +1,65 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { motion } from 'framer-motion';
+import { DUR, EASE, s } from './motion/tokens';
+import type { Category } from '@echorift/shared';
 import { CrtScheduler } from './CrtScheduler';
+import { CategorySelect } from './CategorySelect';
+import { Countdown } from './Countdown';
+import { Caret, CloseIcon, WindowDots } from './icons/CrtIcons';
 
 interface Props {
-  file: string;
+  /** One or more files. Length drives the stagger UI. */
+  files: string[];
+  categories: Category[];
+  defaultCategory: string | null;
   csrfToken: string;
   onClose: () => void;
-  onConfirm: (timeIso: string) => Promise<void>;
+  onConfirm: (
+    scheduled: { file: string; time: string }[],
+    category: string | null,
+  ) => Promise<void>;
 }
 
-export function ScheduleModal({ file, csrfToken, onClose, onConfirm }: Props) {
+const STAGGER_PRESETS: { label: string; minutes: number }[] = [
+  { label: '[ NONE ]', minutes: 0 },
+  { label: '[ +1H ]', minutes: 60 },
+  { label: '[ +6H ]', minutes: 360 },
+  { label: '[ +12H ]', minutes: 720 },
+  { label: '[ +24H ]', minutes: 1440 },
+  { label: '[ +7D ]', minutes: 10080 },
+];
+
+export function ScheduleModal({
+  files,
+  categories,
+  defaultCategory,
+  csrfToken,
+  onClose,
+  onConfirm,
+}: Props) {
   const [datetime, setDatetime] = useState(() => new Date(Date.now() + 3_600_000).toISOString());
+  const [staggerMin, setStaggerMin] = useState(0);
+  const [category, setCategory] = useState<string | null>(defaultCategory);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
   const [mounted, setMounted] = useState(false);
+
+  const bulk = files.length > 1;
+
+  // Plain UTC arithmetic, so "+24H" is exactly 24 hours rather than "the same
+  // wall-clock time tomorrow" — across a DST boundary those differ by an hour.
+  // The API stores absolute instants, so this is the honest interpretation.
+  const entries = useMemo(
+    () =>
+      files.map((file, i) => ({
+        file,
+        time: new Date(new Date(datetime).getTime() + i * staggerMin * 60_000).toISOString(),
+      })),
+    [files, datetime, staggerMin],
+  );
 
   useEffect(() => setMounted(true), []);
 
@@ -35,14 +78,24 @@ export function ScheduleModal({ file, csrfToken, onClose, onConfirm }: Props) {
 
   const handleConfirm = async () => {
     if (!csrfToken) { setError('Session expired. Please reload.'); return; }
+    // Checking the start alone is sufficient: the stagger is non-negative, so
+    // every later entry is further into the future by construction.
     if (new Date(datetime).getTime() <= Date.now()) {
       setError('Schedule time must be in the future.');
+      return;
+    }
+    if (!Number.isInteger(staggerMin) || staggerMin < 0) {
+      setError('Interval must be a whole number of minutes, 0 or more.');
+      return;
+    }
+    if (!category) {
+      setError('Select a category.');
       return;
     }
     setSubmitting(true);
     setError('');
     try {
-      await onConfirm(datetime);
+      await onConfirm(entries, category);
     } catch (err) {
       const msg = (err as Error).message;
       setError(msg.includes('timeout') || msg.includes('abort') ? 'Request timed out' : msg);
@@ -57,7 +110,7 @@ export function ScheduleModal({ file, csrfToken, onClose, onConfirm }: Props) {
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
       exit={{ opacity: 0 }}
-      transition={{ duration: 0.15 }}
+      transition={{ duration: s(DUR.d2), ease: [...EASE.snap] }}
       onClick={onClose}
       role="presentation"
       style={{
@@ -78,8 +131,8 @@ export function ScheduleModal({ file, csrfToken, onClose, onConfirm }: Props) {
         initial={{ opacity: 0, y: -10, scale: 0.98 }}
         animate={{ opacity: 1, y: 0, scale: 1 }}
         exit={{ opacity: 0, y: -10, scale: 0.98 }}
-        transition={{ duration: 0.15 }}
-        onClick={(e) => e.stopPropagation()}
+        transition={{ duration: s(DUR.d2), ease: [...EASE.snap] }}
+        onClick={(e: React.MouseEvent<HTMLDivElement>) => e.stopPropagation()}
         role="dialog"
         aria-modal="true"
         aria-labelledby="schedule-modal-title"
@@ -96,7 +149,7 @@ export function ScheduleModal({ file, csrfToken, onClose, onConfirm }: Props) {
         }}
       >
         <div style={titleBarStyle}>
-          <span>● ○ ○</span>
+          <WindowDots />
           <span id="schedule-modal-title" style={{ flex: 1, textAlign: 'center', color: '#ffb000' }}>
             admin.echorift.local — schedule.sh
           </span>
@@ -104,19 +157,110 @@ export function ScheduleModal({ file, csrfToken, onClose, onConfirm }: Props) {
             type="button"
             aria-label="Close"
             onClick={onClose}
+            className="cur-pointer"
             style={closeBtnStyle}
           >
-            ✕
+            <CloseIcon size={12} />
           </button>
         </div>
 
         <div style={{ padding: '1rem', display: 'flex', flexDirection: 'column', gap: '0.6rem', overflowY: 'auto' }}>
           <div style={fileLabelStyle}>
-            <span style={{ color: '#8a5f00' }}>FILE: </span>
-            <span style={{ color: '#ffb000', fontWeight: 700 }}>{file}</span>
+            {bulk ? (
+              <>
+                <span style={{ color: '#8a5f00' }}>FILES: </span>
+                <span style={{ color: '#ffb000', fontWeight: 700 }}>
+                  {files.length} SELECTED
+                </span>
+              </>
+            ) : (
+              <>
+                <span style={{ color: '#8a5f00' }}>FILE: </span>
+                <span style={{ color: '#ffb000', fontWeight: 700 }}>{files[0]}</span>
+              </>
+            )}
           </div>
 
           <CrtScheduler value={datetime} onChange={setDatetime} />
+
+          {bulk && (
+            <>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', flexWrap: 'wrap' }}>
+                <span style={{ ...fileLabelStyle, color: '#8a5f00' }}>EVERY:</span>
+                {STAGGER_PRESETS.map((preset) => (
+                  <button
+                    key={preset.minutes}
+                    type="button"
+                    className="crt-btn small"
+                    aria-pressed={staggerMin === preset.minutes}
+                    onClick={() => setStaggerMin(preset.minutes)}
+                    disabled={submitting}
+                    style={
+                      staggerMin === preset.minutes
+                        ? { borderColor: '#39ff14', color: '#39ff14' }
+                        : undefined
+                    }
+                  >
+                    {preset.label}
+                  </button>
+                ))}
+                <input
+                  type="number"
+                  min={0}
+                  step={1}
+                  className="crt-input"
+                  value={staggerMin}
+                  aria-label="Interval between releases, in minutes"
+                  disabled={submitting}
+                  onChange={(e) => setStaggerMin(Math.max(0, Math.floor(Number(e.target.value) || 0)))}
+                  style={{ width: '5rem', flex: '0 0 5rem', padding: '0.25rem 0.4rem', fontSize: 'max(11px, 16px)' }}
+                />
+                <span style={{ ...fileLabelStyle, color: '#8a5f00' }}>MIN</span>
+              </div>
+
+              <div className="crt-file-list" role="list" aria-label="Scheduled release times">
+                {entries.map((entry, i) => (
+                  <div
+                    key={entry.file}
+                    role="listitem"
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      flexWrap: 'wrap',
+                      gap: '0.5rem',
+                      padding: '0.35rem 0.6rem',
+                      borderBottom: '1px solid #1a1f12',
+                      fontFamily: "var(--font-jetbrains-mono), monospace",
+                      fontSize: '11px',
+                      color: '#ffb000',
+                    }}
+                  >
+                    <span style={{ color: '#8a5f00', minWidth: '2rem', flexShrink: 0 }}>
+                      {String(i + 1).padStart(3, '0')}
+                    </span>
+                    <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {entry.file}
+                    </span>
+                    <span style={{ color: '#8a5f00', fontSize: '10px', flexShrink: 0 }}>
+                      {new Date(entry.time).toLocaleString()}
+                    </span>
+                    <Countdown time={entry.time} />
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
+            <span style={{ ...fileLabelStyle, color: '#8a5f00' }}>CATEGORY:</span>
+            <CategorySelect
+              categories={categories}
+              value={category}
+              onChange={setCategory}
+              ariaLabel={bulk ? 'Category for scheduled tracks' : `Category for ${files[0]}`}
+              disabled={submitting}
+            />
+          </div>
 
           {error && (
             <p className="crt-error" role="alert">&gt; {error}</p>
@@ -135,11 +279,11 @@ export function ScheduleModal({ file, csrfToken, onClose, onConfirm }: Props) {
               type="button"
               className="crt-btn small"
               onClick={handleConfirm}
-              disabled={submitting || !csrfToken}
+              disabled={submitting || !csrfToken || !category}
             >
               {submitting ? (
                 <>
-                  SCHEDULING<span aria-hidden="true" style={{ animation: 'blink 0.6s step-start infinite' }}>▮</span>
+                  SCHEDULING<Caret speed={0.6} />
                 </>
               ) : (
                 '[ CONFIRM SCHEDULE ]'
@@ -160,7 +304,7 @@ const titleBarStyle: React.CSSProperties = {
   padding: '0.35rem 0.75rem',
   background: '#11140c',
   borderBottom: '1px solid #ffb000',
-  fontFamily: "'JetBrains Mono', monospace",
+  fontFamily: "var(--font-jetbrains-mono), monospace",
   fontSize: '11px',
   color: '#8a5f00',
   letterSpacing: '0.06em',
@@ -172,12 +316,13 @@ const closeBtnStyle: React.CSSProperties = {
   border: 'none',
   color: '#ff3b3b',
   fontSize: '12px',
-  cursor: 'pointer',
   padding: '0 0.25rem',
+  display: 'inline-flex',
+  alignItems: 'center',
 };
 
 const fileLabelStyle: React.CSSProperties = {
-  fontFamily: "'JetBrains Mono', monospace",
+  fontFamily: "var(--font-jetbrains-mono), monospace",
   fontSize: '11px',
   letterSpacing: '0.04em',
   overflow: 'hidden',

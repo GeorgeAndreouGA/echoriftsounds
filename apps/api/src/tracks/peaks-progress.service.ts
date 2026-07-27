@@ -2,11 +2,25 @@ import { Injectable, Logger } from '@nestjs/common';
 import { Subject } from 'rxjs';
 import { PeaksService } from './peaks.service';
 
-export type PeaksJobStatus = 'queued' | 'running' | 'retrying' | 'done';
+export type PeaksJobStatus =
+  | 'queued'
+  | 'running'
+  | 'retrying'
+  | 'done'
+  | 'failed';
+
+/**
+ * Which half of the job is running. Publishing a track is peaks generation
+ * followed by a transcode, and on a 2-hour track that split is ~12 s then ~58 s
+ * — so a panel that calls the whole thing "peaks" is telling the admin the
+ * wrong thing for 83% of the wait.
+ */
+export type PeaksJobPhase = 'peaks' | 'stream';
 
 export interface PeaksJob {
   file: string;
   status: PeaksJobStatus;
+  phase?: PeaksJobPhase;
   startedAt?: number;
   finishedAt?: number;
   error?: string;
@@ -35,6 +49,17 @@ const TERMINAL_TTL_MS = 30_000;
 
 // Backoff schedule between retries: 1s, 2s, 4s, … capped at 5 minutes.
 const RETRY_CAP_MS = 5 * 60_000;
+
+// Give up after this many attempts and park the job in `failed`.
+//
+// Without a ceiling, a permanently-undecodable file retries forever, and each
+// attempt occupies one of only two pipeline slots. That is harmless when the
+// failure is a fast ffprobe reject, and corrosive when it is a large file that
+// fails mid-decode: a full multi-minute decode, over and over, permanently
+// halving publish throughput. Five attempts spans ~31 s of backoff, which is
+// more than enough to ride out a transient NAS blip — anything still failing
+// after that is a property of the file, not of the moment.
+const MAX_ATTEMPTS = 5;
 
 @Injectable()
 export class PeaksProgressService {
@@ -66,8 +91,9 @@ export class PeaksProgressService {
    * Generate peaks for each file, then call `onReady(file)` once the JSON is
    * fully on disk. The track only becomes "published" inside onReady — so
    * the public site never sees a track without its waveform. Failures (peaks
-   * generation OR onReady itself) trigger an exponential-backoff retry that
-   * continues until the file succeeds or is forgotten via `forget()`.
+   * generation OR onReady itself) trigger an exponential-backoff retry, up to
+   * MAX_ATTEMPTS, after which the job parks in `failed` and stops consuming
+   * pipeline slots. `forget()` cancels at any point.
    *
    * Fire-and-forget: returns immediately; observe progress via `stream$`.
    * Re-issuing the same file while it is already in-flight is a no-op.
@@ -99,9 +125,11 @@ export class PeaksProgressService {
     if (changed) this.emit();
   }
 
+  // `failed` counts as inactive so re-issuing the file starts a fresh attempt
+  // series — retrying a parked job is exactly what re-publishing it means.
   private isActive(file: string): boolean {
     const job = this.jobs.get(file);
-    return !!job && job.status !== 'done';
+    return !!job && job.status !== 'done' && job.status !== 'failed';
   }
 
   private async runWithRetry(file: string, onReady: OnReady): Promise<void> {
@@ -118,11 +146,13 @@ export class PeaksProgressService {
       }
 
       let error: string | undefined;
+      const startedAt = Date.now();
       try {
         this.jobs.set(file, {
           file,
           status: 'running',
-          startedAt: Date.now(),
+          phase: 'peaks',
+          startedAt,
           attempt,
         });
         this.emit();
@@ -134,6 +164,18 @@ export class PeaksProgressService {
           // The aborted-cleanup path below removes the orphan JSON.
           break;
         }
+
+        // The rest of the job is the transcode plus the published.json write.
+        // On a 2-hour track it is the large majority of the wall clock, so it
+        // gets its own phase rather than hiding behind "peaks".
+        this.jobs.set(file, {
+          file,
+          status: 'running',
+          phase: 'stream',
+          startedAt,
+          attempt,
+        });
+        this.emit();
 
         await onReady(file);
         publishedOk = true;
@@ -155,6 +197,24 @@ export class PeaksProgressService {
         });
         this.emit();
         this.schedulePrune(file);
+        return;
+      }
+
+      if (attempt >= MAX_ATTEMPTS) {
+        this.logger.error(
+          `peaks/publish gave up on ${file} after ${attempt} attempts: ${error}`,
+        );
+        // Parked, not pruned: the track is still withheld from published.json,
+        // and leaving the row on screen is the only thing that tells the admin
+        // why. Re-publishing the file clears it and starts over.
+        this.jobs.set(file, {
+          file,
+          status: 'failed',
+          error,
+          attempt,
+          finishedAt: Date.now(),
+        });
+        this.emit();
         return;
       }
 

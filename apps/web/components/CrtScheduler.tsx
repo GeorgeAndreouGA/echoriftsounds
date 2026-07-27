@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
+import { DUR, EASE, s } from './motion/tokens';
 import { Countdown, isPast } from './Countdown';
 
 interface Props {
@@ -59,6 +60,7 @@ function DigitCell({ digit, label, onBump }: DigitCellProps) {
         type="button"
         aria-label={`Increment ${label}`}
         onClick={() => onBump(1)}
+        className="cur-pointer"
         style={chevronStyle}
       >
         ▲
@@ -80,7 +82,7 @@ function DigitCell({ digit, label, onBump }: DigitCellProps) {
             initial={{ opacity: 0, filter: 'blur(2px)', y: -4 }}
             animate={{ opacity: 1, filter: 'blur(0px)', y: 0 }}
             exit={{ opacity: 0, filter: 'blur(2px)', y: 4 }}
-            transition={{ duration: 0.12 }}
+            transition={{ duration: s(DUR.d2), ease: [...EASE.snap] }}
             style={{ display: 'inline-block' }}
           >
             {digit}
@@ -91,6 +93,7 @@ function DigitCell({ digit, label, onBump }: DigitCellProps) {
         type="button"
         aria-label={`Decrement ${label}`}
         onClick={() => onBump(-1)}
+        className="cur-pointer"
         style={chevronStyle}
       >
         ▼
@@ -244,6 +247,7 @@ export function CrtScheduler({ value, onChange }: Props) {
                   aria-selected={isSelected}
                   disabled={isPastDay}
                   onClick={() => selectDay(day)}
+                  className={isPastDay ? 'cur-not-allowed' : 'cur-pointer'}
                   style={dayCellStyle(isToday, isSelected, isPastDay)}
                 >
                   {pad2(day)}
@@ -277,7 +281,7 @@ const panelStyle: React.CSSProperties = {
   display: 'flex',
   flexDirection: 'column',
   gap: '0.5rem',
-  fontFamily: "'JetBrains Mono', monospace",
+  fontFamily: "var(--font-jetbrains-mono), monospace",
   fontSize: '11px',
   color: '#8a5f00',
   background: '#0a0b06',
@@ -308,9 +312,8 @@ const chevronStyle: React.CSSProperties = {
   background: 'transparent',
   border: 'none',
   color: '#8a5f00',
-  fontFamily: "'JetBrains Mono', monospace",
+  fontFamily: "var(--font-jetbrains-mono), monospace",
   fontSize: '12px',
-  cursor: 'pointer',
   padding: '0.05rem 0.3rem',
   lineHeight: 1,
 };
@@ -324,7 +327,7 @@ const digitCellStyle: React.CSSProperties = {
   border: '1px solid #ffb000',
   background: '#0a0b06',
   color: '#ffb000',
-  fontFamily: "'JetBrains Mono', monospace",
+  fontFamily: "var(--font-jetbrains-mono), monospace",
   fontSize: '24px',
   fontWeight: 700,
   letterSpacing: 0,
@@ -336,7 +339,7 @@ const digitCellStyle: React.CSSProperties = {
 
 const colonStyle: React.CSSProperties = {
   color: '#ffb000',
-  fontFamily: "'JetBrains Mono', monospace",
+  fontFamily: "var(--font-jetbrains-mono), monospace",
   fontSize: '24px',
   fontWeight: 700,
   padding: '0 0.15rem',
@@ -406,14 +409,13 @@ function dayCellStyle(isToday: boolean, isSelected: boolean, isPastDay: boolean)
   }
   return {
     textAlign: 'center',
-    fontFamily: "'JetBrains Mono', monospace",
+    fontFamily: "var(--font-jetbrains-mono), monospace",
     fontSize: '11px',
     fontWeight: isSelected || isToday ? 700 : 400,
     padding: '0.15rem 0',
     background,
     border,
     color,
-    cursor: isPastDay ? 'not-allowed' : 'pointer',
     letterSpacing: 0,
   };
 }

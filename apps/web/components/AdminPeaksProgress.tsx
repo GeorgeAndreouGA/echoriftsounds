@@ -2,13 +2,17 @@
 
 import { useEffect, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
+import { DUR, EASE, s } from './motion/tokens';
 import * as api from '../lib/api';
+import { Caret } from './icons/CrtIcons';
 
-type JobStatus = 'queued' | 'running' | 'retrying' | 'done';
+type JobStatus = 'queued' | 'running' | 'retrying' | 'done' | 'failed';
+type JobPhase = 'peaks' | 'stream';
 
 interface PeaksJob {
   file: string;
   status: JobStatus;
+  phase?: JobPhase;
   startedAt?: number;
   finishedAt?: number;
   error?: string;
@@ -34,6 +38,7 @@ const STATUS_COLOR: Record<JobStatus, string> = {
   running: '#ffb000',
   retrying: '#ff9933',
   done: '#39ff14',
+  failed: '#ff3b3b',
 };
 
 const STATUS_LABEL: Record<JobStatus, string> = {
@@ -41,6 +46,14 @@ const STATUS_LABEL: Record<JobStatus, string> = {
   running: 'RUNNING',
   retrying: 'RETRYING',
   done: 'DONE',
+  failed: 'FAILED',
+};
+
+// What a running job is actually doing. On a 2-hour track the transcode is ~58s
+// of the ~70s, so showing "PEAKS" throughout was wrong for most of the wait.
+const PHASE_LABEL: Record<JobPhase, string> = {
+  peaks: 'PEAKS',
+  stream: 'STREAM',
 };
 
 function fmtDuration(ms: number): string {
@@ -62,6 +75,9 @@ function jobMeta(job: PeaksJob, now: number): string {
   if (job.status === 'done' && job.startedAt && job.finishedAt) {
     return fmtDuration(job.finishedAt - job.startedAt);
   }
+  if (job.status === 'failed') {
+    return `gave up after ${job.attempt ?? 0}`;
+  }
   return '';
 }
 
@@ -73,7 +89,7 @@ export function AdminPeaksProgress({ authed, csrfToken, onComplete }: Props) {
 
   useEffect(() => {
     if (!authed) return;
-    const es = new EventSource('/api/admin/peaks-progress', {
+    const es = new EventSource(api.withBase('/api/admin/peaks-progress'), {
       withCredentials: true,
     });
     es.onopen = () => setConnected(true);
@@ -96,7 +112,11 @@ export function AdminPeaksProgress({ authed, csrfToken, onComplete }: Props) {
   }, []);
 
   const total = snapshot?.jobs.length ?? 0;
-  const inProgress = (snapshot?.jobs ?? []).filter((j) => j.status !== 'done').length;
+  // `failed` is terminal, like `done` — a parked job is waiting on a human, not
+  // on the pipeline, so it must not hold the run open forever.
+  const inProgress = (snapshot?.jobs ?? []).filter(
+    (j) => j.status !== 'done' && j.status !== 'failed',
+  ).length;
   useEffect(() => {
     if (!onComplete) return;
     if (total > 0 && inProgress === 0) onComplete();
@@ -117,10 +137,11 @@ export function AdminPeaksProgress({ authed, csrfToken, onComplete }: Props) {
   const jobs = snapshot?.jobs ?? [];
   const sorted = [...jobs].sort((a, b) => {
     const order: Record<JobStatus, number> = {
-      running: 0,
-      retrying: 1,
-      queued: 2,
-      done: 3,
+      failed: 0,
+      running: 1,
+      retrying: 2,
+      queued: 3,
+      done: 4,
     };
     if (order[a.status] !== order[b.status]) return order[a.status] - order[b.status];
     return (b.finishedAt ?? b.startedAt ?? 0) - (a.finishedAt ?? a.startedAt ?? 0);
@@ -137,7 +158,7 @@ export function AdminPeaksProgress({ authed, csrfToken, onComplete }: Props) {
         }}
       >
         <div className="crt-section-title" style={{ margin: 0 }}>
-          PEAKS GENERATION
+          MEDIA PROCESSING
         </div>
         <span
           aria-hidden="true"
@@ -153,7 +174,7 @@ export function AdminPeaksProgress({ authed, csrfToken, onComplete }: Props) {
         <span
           style={{
             color: '#8a5f00',
-            fontFamily: "'JetBrains Mono', monospace",
+            fontFamily: "var(--font-jetbrains-mono), monospace",
             fontSize: '10px',
             letterSpacing: '0.06em',
           }}
@@ -165,7 +186,7 @@ export function AdminPeaksProgress({ authed, csrfToken, onComplete }: Props) {
           <span
             style={{
               color: '#8a5f00',
-              fontFamily: "'JetBrains Mono', monospace",
+              fontFamily: "var(--font-jetbrains-mono), monospace",
               fontSize: '10px',
               letterSpacing: '0.06em',
             }}
@@ -175,14 +196,14 @@ export function AdminPeaksProgress({ authed, csrfToken, onComplete }: Props) {
         )}
       </div>
 
-      <div className="crt-file-list" role="list" aria-label="Peaks generation jobs">
+      <div className="crt-file-list" role="list" aria-label="Media processing jobs">
         {sorted.length === 0 && (
           <div
             style={{
               padding: '1rem',
               textAlign: 'center',
               color: '#8a5f00',
-              fontFamily: "'JetBrains Mono', monospace",
+              fontFamily: "var(--font-jetbrains-mono), monospace",
               fontSize: '11px',
             }}
             role="status"
@@ -194,6 +215,9 @@ export function AdminPeaksProgress({ authed, csrfToken, onComplete }: Props) {
           {sorted.map((job) => {
             const isCancelling = cancelling.includes(job.file);
             const cancellable = job.status !== 'done';
+            // A failed job isn't cancelled, it's acknowledged — same call,
+            // different word, because there is nothing left running to stop.
+            const actionLabel = job.status === 'failed' ? 'DISMISS' : 'CANCEL';
             return (
               <motion.div
                 key={job.file}
@@ -201,14 +225,14 @@ export function AdminPeaksProgress({ authed, csrfToken, onComplete }: Props) {
                 initial={{ opacity: 0, x: -8 }}
                 animate={{ opacity: isCancelling ? 0.4 : 1, x: 0 }}
                 exit={{ opacity: 0, scaleY: 0 }}
-                transition={{ duration: 0.18 }}
+                transition={{ duration: s(DUR.d3), ease: [...EASE.snap] }}
                 style={{
                   display: 'flex',
                   alignItems: 'center',
                   gap: '0.5rem',
                   padding: '0.4rem 0.6rem',
                   borderBottom: '1px solid #1a1f12',
-                  fontFamily: "'JetBrains Mono', monospace",
+                  fontFamily: "var(--font-jetbrains-mono), monospace",
                   fontSize: '11px',
                 }}
               >
@@ -224,12 +248,25 @@ export function AdminPeaksProgress({ authed, csrfToken, onComplete }: Props) {
                   {job.status === 'running' ? (
                     <>
                       {STATUS_LABEL[job.status]}
-                      <span aria-hidden="true" style={{ animation: 'blink 0.6s step-start infinite' }}>▮</span>
+                      <Caret speed={0.6} />
                     </>
                   ) : (
                     STATUS_LABEL[job.status]
                   )}
                 </span>
+                {job.status === 'running' && job.phase && (
+                  <span
+                    style={{
+                      minWidth: '3.5rem',
+                      color: '#8a5f00',
+                      fontSize: '10px',
+                      letterSpacing: '0.06em',
+                      flexShrink: 0,
+                    }}
+                  >
+                    {PHASE_LABEL[job.phase]}
+                  </span>
+                )}
                 <span
                   style={{
                     flex: 1,
@@ -245,6 +282,13 @@ export function AdminPeaksProgress({ authed, csrfToken, onComplete }: Props) {
                   {job.attempt && job.attempt > 1 && (
                     <span style={{ color: '#8a5f00', marginLeft: '0.4rem' }}>
                       [#{job.attempt}]
+                    </span>
+                  )}
+                  {/* On a parked job the reason IS the content — a hover title
+                      is no use to someone scanning for what broke. */}
+                  {job.status === 'failed' && job.error && (
+                    <span style={{ color: '#ff3b3b', marginLeft: '0.4rem' }}>
+                      — {job.error}
                     </span>
                   )}
                 </span>
@@ -265,10 +309,10 @@ export function AdminPeaksProgress({ authed, csrfToken, onComplete }: Props) {
                     className="crt-btn small danger"
                     onClick={() => handleCancel(job.file)}
                     disabled={isCancelling || !csrfToken}
-                    aria-label={`Cancel ${job.file}`}
+                    aria-label={`${actionLabel} ${job.file}`}
                     style={{ flexShrink: 0 }}
                   >
-                    [ CANCEL ]
+                    [ {actionLabel} ]
                   </button>
                 )}
               </motion.div>

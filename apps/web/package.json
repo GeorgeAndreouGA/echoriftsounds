@@ -2,6 +2,7 @@
   "name": "@echorift/web",
   "version": "0.0.0",
   "private": true,
+  "license": "PolyForm-Noncommercial-1.0.0",
   "scripts": {
     "build": "next build",
     "dev": "next dev -p 3000",
@@ -11,7 +12,7 @@
   "dependencies": {
     "@echorift/shared": "workspace:*",
     "framer-motion": "^11.0.0",
-    "next": "^15.0.0",
+    "next": "^15.5.18",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "wavesurfer.js": "^7.0.0"

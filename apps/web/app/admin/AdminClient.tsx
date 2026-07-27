@@ -1,38 +1,49 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
-import type { ScheduledTrack } from '@echorift/shared';
+import { useState, useEffect, useCallback, useMemo } from 'react';
+import type { Category, PublishedTrack, ScheduledTrack } from '@echorift/shared';
 import { useCsrf } from '../../hooks/useCsrf';
 import { useAdminAuth } from '../../hooks/useAdminAuth';
 import { useIdleLogout } from '../../hooks/useIdleLogout';
+import { useLiveChanges } from '../../hooks/useLiveChanges';
 import * as api from '../../lib/api';
 import { LoginForm } from '../../components/LoginForm';
 import { AdminPublishForm } from '../../components/AdminPublishForm';
+import { AdminCategories } from '../../components/AdminCategories';
 import { AdminScheduledList } from '../../components/AdminScheduledList';
 import { AdminPublishedList } from '../../components/AdminPublishedList';
 import { AdminPeaksProgress } from '../../components/AdminPeaksProgress';
 import { WindowChrome } from '../../components/chrome/WindowChrome';
+import { Caret } from '../../components/icons/CrtIcons';
 
-export function AdminClient() {
-  const { authed, csrfToken, setCsrfToken, login, logout } = useAdminAuth();
+interface Props {
+  /** Minutes of inactivity before auto-logout. Supplied by the server from IDLE_MINUTES. */
+  idleMinutes: number;
+}
+
+export function AdminClient({ idleMinutes }: Props) {
+  const { authed, checking, csrfToken, setCsrfToken, login, logout } = useAdminAuth();
   useCsrf(authed, setCsrfToken);
-  useIdleLogout(15 * 60 * 1000, logout);
+  useIdleLogout(idleMinutes * 60 * 1000, logout);
 
   const [allFiles, setAllFiles] = useState<string[]>([]);
-  const [published, setPublished] = useState<string[]>([]);
+  const [published, setPublished] = useState<PublishedTrack[]>([]);
   const [scheduled, setScheduled] = useState<ScheduledTrack[]>([]);
+  const [categories, setCategories] = useState<Category[]>([]);
   const [loading, setLoading] = useState(true);
 
   const refresh = useCallback(async () => {
     try {
-      const [f, p, s] = await Promise.all([
+      const [f, p, s, c] = await Promise.all([
         api.adminFiles(),
         api.adminPublished(),
         api.adminScheduled(),
+        api.adminCategories(),
       ]);
       setAllFiles(f);
       setPublished(p);
       setScheduled(s);
+      setCategories(c);
     } catch (err) {
       if (err instanceof Error && err.message.startsWith('401')) logout();
     } finally {
@@ -44,10 +55,48 @@ export function AdminClient() {
     if (csrfToken) refresh();
   }, [csrfToken, refresh]);
 
+  // Pick up changes made elsewhere — another admin tab, or the scheduler
+  // releasing a due track — without needing a manual refresh.
+  useLiveChanges(refresh, authed);
+
+  // Tracks per category (published + scheduled) — the categories panel disables
+  // deletion of any category that still has tracks, matching the server guard.
+  const categoryCounts = useMemo(() => {
+    const acc: Record<string, number> = {};
+    for (const c of categories) acc[c.id] = 0;
+    for (const t of [...published, ...scheduled]) {
+      if (t.category && acc[t.category] !== undefined) acc[t.category] += 1;
+    }
+    return acc;
+  }, [categories, published, scheduled]);
+
+  // Don't decide between panel and login form until the session probe answers,
+  // otherwise a valid session flashes the login form on every refresh.
+  if (checking) {
+    return (
+      <main id="main-content" className="crt-container">
+        <p
+          role="status"
+          style={{
+            padding: '2rem',
+            textAlign: 'center',
+            color: '#8a5f00',
+            fontFamily: "var(--font-jetbrains-mono), monospace",
+            fontSize: '12px',
+            letterSpacing: '0.08em',
+          }}
+        >
+          &gt; RESTORING SESSION<Caret speed={0.6} />
+        </p>
+      </main>
+    );
+  }
+
   if (!authed) return <LoginForm onLogin={login} />;
 
+  const publishedFiles = new Set(published.map((t) => t.file));
   const available = allFiles.filter(
-    (f) => !published.includes(f) && !scheduled.some((s) => s.file === f),
+    (f) => !publishedFiles.has(f) && !scheduled.some((s) => s.file === f),
   );
 
   return (
@@ -57,7 +106,7 @@ export function AdminClient() {
         <div
           aria-hidden="true"
           style={{
-            fontFamily: "'JetBrains Mono', monospace",
+            fontFamily: "var(--font-jetbrains-mono), monospace",
             fontSize: '11px',
             color: '#8a5f00',
             letterSpacing: '0.1em',
@@ -68,7 +117,7 @@ export function AdminClient() {
         </div>
         <h1
           style={{
-            fontFamily: "'JetBrains Mono', monospace",
+            fontFamily: "var(--font-jetbrains-mono), monospace",
             fontSize: '18px',
             fontWeight: 700,
             color: '#ffb000',
@@ -80,7 +129,7 @@ export function AdminClient() {
         <div
           aria-hidden="true"
           style={{
-            fontFamily: "'JetBrains Mono', monospace",
+            fontFamily: "var(--font-jetbrains-mono), monospace",
             fontSize: '11px',
             color: '#8a5f00',
             letterSpacing: '0.1em',
@@ -106,7 +155,7 @@ export function AdminClient() {
           style={{
             textAlign: 'center',
             padding: '3rem',
-            fontFamily: "'JetBrains Mono', monospace",
+            fontFamily: "var(--font-jetbrains-mono), monospace",
             fontSize: '13px',
             color: '#8a5f00',
             letterSpacing: '0.06em',
@@ -114,13 +163,14 @@ export function AdminClient() {
           role="status"
         >
           &gt; LOADING
-          <span aria-hidden="true" style={{ animation: 'blink 0.8s step-start infinite' }}>▮</span>
+          <Caret speed={0.8} />
         </div>
       ) : (
         <>
           <WindowChrome title="publish.sh" delay={0}>
             <AdminPublishForm
               files={available}
+              categories={categories}
               csrfToken={csrfToken}
               onSuccess={refresh}
             />
@@ -134,17 +184,28 @@ export function AdminClient() {
             />
           </WindowChrome>
 
-          <WindowChrome title="scheduler.sh" delay={0.16}>
-            <AdminScheduledList
-              items={scheduled}
+          <WindowChrome title="categories.sh" delay={0.16}>
+            <AdminCategories
+              items={categories}
+              counts={categoryCounts}
               csrfToken={csrfToken}
               onSuccess={refresh}
             />
           </WindowChrome>
 
-          <WindowChrome title="published.sh" delay={0.24}>
+          <WindowChrome title="scheduler.sh" delay={0.24}>
+            <AdminScheduledList
+              items={scheduled}
+              categories={categories}
+              csrfToken={csrfToken}
+              onSuccess={refresh}
+            />
+          </WindowChrome>
+
+          <WindowChrome title="published.sh" delay={0.32}>
             <AdminPublishedList
               items={published}
+              categories={categories}
               csrfToken={csrfToken}
               onSuccess={refresh}
             />

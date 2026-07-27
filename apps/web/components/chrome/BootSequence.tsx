@@ -1,7 +1,10 @@
 'use client';
 
 import { useEffect, useState, useCallback } from 'react';
-import { motion, AnimatePresence, useReducedMotion } from 'framer-motion';
+import { motion, AnimatePresence } from 'framer-motion';
+import { DUR, EASE, SEQ, s } from '../motion/tokens';
+import { useMotionTier } from '../../lib/motion/useMotionTier';
+import { Caret } from '../icons/CrtIcons';
 
 const BOOT_LINES = [
   '> INITIALIZING AUDIO ARCHIVE...',
@@ -18,19 +21,21 @@ function BootScreen({ onDone }: { onDone: () => void }) {
   const [phase, setPhase] = useState(0);
   const [visibleLines, setVisibleLines] = useState<string[]>([]);
   const [lineIdx, setLineIdx] = useState(0);
-  const reduceMotion = useReducedMotion();
+  // 'none' never reaches here — BootSequence skips the screen entirely — so this
+  // only picks between the full power-off and the cheaper fade on 'light'.
+  const tier = useMotionTier();
 
   const skip = useCallback(() => onDone(), [onDone]);
 
   useEffect(() => {
-    const t = setTimeout(() => setPhase(1), 200);
+    const t = setTimeout(() => setPhase(1), SEQ.bootWarmupMs);
     return () => clearTimeout(t);
   }, []);
 
   useEffect(() => {
     if (phase < 1) return;
     if (lineIdx >= BOOT_LINES.length) {
-      const t = setTimeout(onDone, 350);
+      const t = setTimeout(onDone, SEQ.bootHoldMs);
       return () => clearTimeout(t);
     }
     const line = BOOT_LINES[lineIdx];
@@ -45,9 +50,12 @@ function BootScreen({ onDone }: { onDone: () => void }) {
       });
       if (i >= chars) {
         clearInterval(interval);
-        setTimeout(() => setLineIdx((n) => n + 1), lineIdx === BOOT_LINES.length - 1 ? 200 : 60);
+        setTimeout(
+          () => setLineIdx((n) => n + 1),
+          lineIdx === BOOT_LINES.length - 1 ? SEQ.bootLastGapMs : SEQ.bootLineGapMs,
+        );
       }
-    }, 22);
+    }, 1000 / SEQ.cpsBoot);
     return () => clearInterval(interval);
   }, [phase, lineIdx, onDone]);
 
@@ -56,11 +64,12 @@ function BootScreen({ onDone }: { onDone: () => void }) {
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
       exit={
-        reduceMotion
-          ? { opacity: 0 }
-          : { opacity: 0, scaleY: 0.05, filter: 'brightness(6)' }
+        tier === 'full'
+          ? { opacity: 0, scaleY: 0.05, filter: 'brightness(6)' }
+          : { opacity: 0 }
       }
-      transition={{ duration: 0.15 }}
+      transition={{ duration: s(DUR.d2), ease: [...EASE.kill] }}
+      className="cur-pointer"
       style={{
         position: 'fixed',
         inset: 0,
@@ -71,10 +80,11 @@ function BootScreen({ onDone }: { onDone: () => void }) {
         alignItems: 'center',
         justifyContent: 'center',
         padding: 'clamp(1rem, 4vw, 2rem)',
-        cursor: 'pointer',
       }}
       onClick={skip}
-      onKeyDown={(e) => (e.key === 'Enter' || e.key === ' ') && skip()}
+      onKeyDown={(e: React.KeyboardEvent<HTMLDivElement>) =>
+        (e.key === 'Enter' || e.key === ' ') && skip()
+      }
       tabIndex={0}
       role="status"
       aria-label="Boot sequence loading, press any key to skip"
@@ -83,7 +93,7 @@ function BootScreen({ onDone }: { onDone: () => void }) {
       <motion.div
         initial={{ opacity: 0 }}
         animate={{ opacity: [0, 0.15, 0.08, 0.12, 0.06] }}
-        transition={{ duration: 0.4, times: [0, 0.2, 0.4, 0.6, 1] }}
+        transition={{ duration: s(DUR.d5), times: [0, 0.2, 0.4, 0.6, 1], ease: [...EASE.cut] }}
         style={{
           position: 'absolute',
           inset: 0,
@@ -95,7 +105,7 @@ function BootScreen({ onDone }: { onDone: () => void }) {
       {/* Terminal lines */}
       <div
         style={{
-          fontFamily: "'JetBrains Mono', monospace",
+          fontFamily: "var(--font-jetbrains-mono), monospace",
           fontSize: 'clamp(11px, 2.8vw, 13px)',
           color: '#ffb000',
           maxWidth: 'min(520px, 92vw)',
@@ -107,7 +117,7 @@ function BootScreen({ onDone }: { onDone: () => void }) {
           <div key={i} style={{ minHeight: '1.6em', letterSpacing: '0.04em' }}>
             {visibleLines[i] ?? ''}
             {i === lineIdx && visibleLines[i] !== undefined && (
-              <span aria-hidden="true" style={{ animation: 'blink 0.8s step-start infinite' }}>▮</span>
+              <Caret speed={0.8} />
             )}
           </div>
         ))}
@@ -118,7 +128,7 @@ function BootScreen({ onDone }: { onDone: () => void }) {
           marginTop: '2rem',
           fontSize: '10px',
           color: '#8a5f00',
-          fontFamily: "'JetBrains Mono', monospace",
+          fontFamily: "var(--font-jetbrains-mono), monospace",
           letterSpacing: '0.08em',
         }}
       >
@@ -130,8 +140,17 @@ function BootScreen({ onDone }: { onDone: () => void }) {
 
 export function BootSequence({ children }: { children: React.ReactNode }) {
   const [booted, setBooted] = useState<boolean | null>(null);
+  const tier = useMotionTier();
 
   useEffect(() => {
+    // The boot screen is ~2.5s of full-screen, purely decorative animation. WCAG
+    // 2.3.3 asks for the end state, and a boot screen's end state is the site —
+    // so the right answer for reduced motion isn't "type it instantly", it's
+    // "don't". Skipped before BootScreen ever mounts.
+    if (tier === 'none') {
+      setBooted(true);
+      return;
+    }
     try {
       if (sessionStorage.getItem('__booted')) {
         setBooted(true);
@@ -141,7 +160,7 @@ export function BootSequence({ children }: { children: React.ReactNode }) {
     } catch {
       setBooted(true);
     }
-  }, []);
+  }, [tier]);
 
   const handleDone = useCallback(() => {
     try { sessionStorage.setItem('__booted', '1'); } catch { /* storage unavailable */ }
@@ -159,7 +178,7 @@ export function BootSequence({ children }: { children: React.ReactNode }) {
           key="content"
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
-          transition={{ duration: 0.25 }}
+          transition={{ duration: s(DUR.d4), ease: [...EASE.decay] }}
           style={{ minHeight: '100vh' }}
         >
           {children}

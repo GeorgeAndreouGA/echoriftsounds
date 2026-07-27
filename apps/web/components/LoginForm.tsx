@@ -3,6 +3,8 @@
 import { useState, useEffect, useRef } from 'react';
 import { motion } from 'framer-motion';
 import type { LoginResult } from '../hooks/useAdminAuth';
+import { DUR, EASE, SEQ, s } from './motion/tokens';
+import { Caret, WindowDots } from './icons/CrtIcons';
 
 interface Props {
   onLogin: (username: string, password: string) => Promise<LoginResult>;
@@ -38,7 +40,9 @@ function BorderStroke({ height }: { height: number }) {
         strokeWidth="1"
         initial={{ pathLength: 0, opacity: 0 }}
         animate={{ pathLength: 1, opacity: 1 }}
-        transition={{ duration: 0.7, ease: 'easeInOut' }}
+        // Linear: a beam drawing the frame travels at constant velocity. easeInOut
+        // here implied the beam had mass.
+        transition={{ duration: s(SEQ.borderDrawMs), ease: [...EASE.cut] }}
       />
     </svg>
   );
@@ -138,13 +142,13 @@ export function LoginForm({ onLogin }: Props) {
           background: '#11140c',
           border: '1px solid #8a5f00',
           borderBottom: 'none',
-          fontFamily: "'JetBrains Mono', monospace",
+          fontFamily: "var(--font-jetbrains-mono), monospace",
           fontSize: '11px',
           color: '#8a5f00',
           letterSpacing: '0.06em',
         }}
       >
-        <span>● ○ ○</span>
+        <WindowDots />
         <span style={{ flex: 1, textAlign: 'center' }}>auth.echorift.local — tty1</span>
         {capsLock && (
           <span style={{ color: '#ff3b3b', animation: 'blink 1s step-start infinite', fontSize: '10px' }}>
@@ -158,7 +162,7 @@ export function LoginForm({ onLogin }: Props) {
         ref={formRef}
         onSubmit={handleSubmit}
         animate={shaking ? { x: [-4, 4, -4, 4, -2, 2, 0] } : { x: 0 }}
-        transition={{ duration: 0.4 }}
+        transition={{ duration: s(DUR.d5), ease: [...EASE.cut] }}
         style={{
           position: 'relative',
           width: '100%',
@@ -175,7 +179,7 @@ export function LoginForm({ onLogin }: Props) {
 
         <div
           style={{
-            fontFamily: "'JetBrains Mono', monospace",
+            fontFamily: "var(--font-jetbrains-mono), monospace",
             fontSize: '13px',
             color: '#ffb000',
             letterSpacing: '0.08em',
@@ -190,7 +194,7 @@ export function LoginForm({ onLogin }: Props) {
           <label
             htmlFor="username"
             style={{
-              fontFamily: "'JetBrains Mono', monospace",
+              fontFamily: "var(--font-jetbrains-mono), monospace",
               fontSize: '10px',
               color: '#8a5f00',
               letterSpacing: '0.1em',
@@ -214,7 +218,7 @@ export function LoginForm({ onLogin }: Props) {
           <label
             htmlFor="password"
             style={{
-              fontFamily: "'JetBrains Mono', monospace",
+              fontFamily: "var(--font-jetbrains-mono), monospace",
               fontSize: '10px',
               color: '#8a5f00',
               letterSpacing: '0.1em',
@@ -251,7 +255,7 @@ export function LoginForm({ onLogin }: Props) {
             animate={{ opacity: 1 }}
             style={{
               color: '#39ff14',
-              fontFamily: "'JetBrains Mono', monospace",
+              fontFamily: "var(--font-jetbrains-mono), monospace",
               fontSize: '11px',
               letterSpacing: '0.06em',
             }}
@@ -270,7 +274,7 @@ export function LoginForm({ onLogin }: Props) {
           {loading ? (
             <>
               VERIFYING
-              <span aria-hidden="true" style={{ animation: 'blink 0.6s step-start infinite' }}>▮</span>
+              <Caret speed={0.6} />
             </>
           ) : cooldownSec > 0 ? (
             `[ WAIT ${fmtCooldown(cooldownSec)} ]`

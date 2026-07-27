@@ -16,7 +16,7 @@ export function SearchBox({ onSearch, placeholder = 'SEARCH...' }: Props) {
           top: '50%',
           transform: 'translateY(-50%)',
           color: '#ffb000',
-          fontFamily: "'JetBrains Mono', monospace",
+          fontFamily: "var(--font-jetbrains-mono), monospace",
           fontSize: '13px',
           pointerEvents: 'none',
           lineHeight: 1,

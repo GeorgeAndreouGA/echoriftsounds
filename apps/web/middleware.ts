@@ -36,8 +36,14 @@ export function middleware(request: NextRequest) {
 
 export const config = {
   matcher: [
-    // Skip Next internals and static assets — they're served verbatim and
-    // don't need a per-request nonce.
+    // The index route explicitly. Under a basePath the negative-lookahead
+    // matcher below compiles to `/<base>/…` and requires a trailing segment, so
+    // it never fired for the bare `/<base>` homepage — which shipped with no CSP
+    // and no script nonce while every sub-route was protected. Listing '/' on
+    // its own closes that gap.
+    '/',
+    // Everything else, skipping Next internals and static assets — they're
+    // served verbatim and don't need a per-request nonce.
     {
       source: '/((?!api|_next/static|_next/image|favicon.ico).*)',
       missing: [

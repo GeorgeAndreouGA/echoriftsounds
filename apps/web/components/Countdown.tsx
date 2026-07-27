@@ -21,7 +21,7 @@ export function Countdown({ time }: { time: string }) {
     <span
       style={{
         color: '#22d3ee',
-        fontFamily: "'JetBrains Mono', monospace",
+        fontFamily: "var(--font-jetbrains-mono), monospace",
         fontSize: '11px',
         letterSpacing: '0.06em',
       }}

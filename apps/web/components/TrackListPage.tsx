@@ -1,15 +1,21 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
+import type { Category, PublishedTrack } from '@echorift/shared';
+import * as api from '../lib/api';
 import { SearchBox } from './SearchBox';
 import { TrackCard } from './TrackCard';
+import { CategoryTabs, ALL_CATEGORIES } from './CategoryTabs';
 import { Hero } from './hero/Hero';
 import { useActiveTrack } from '../lib/activeTrack';
-import { staggerContainer } from './motion/glitch';
+import { useLiveChanges } from '../hooks/useLiveChanges';
+import { useStaggeredVariants, useVariants } from './motion/variants';
+import { DUR, EASE, s } from './motion/tokens';
 
 interface Props {
-  tracks: string[];
+  tracks: PublishedTrack[];
+  categories: Category[];
   siteName: string;
   youtubeUrl: string;
   instagramUrl: string;
@@ -17,20 +23,76 @@ interface Props {
   year: number;
 }
 
-export function TrackListPage({ tracks, siteName, youtubeUrl, instagramUrl, facebookUrl, year }: Props) {
+export function TrackListPage({
+  tracks: initialTracks,
+  categories: initialCategories,
+  siteName,
+  youtubeUrl,
+  instagramUrl,
+  facebookUrl,
+  year,
+}: Props) {
   const [query, setQuery] = useState('');
+  const [category, setCategory] = useState<string>(ALL_CATEGORIES);
   const { setFilteredFiles } = useActiveTrack();
-  const filtered = tracks.filter((f) => f.toLowerCase().includes(query.toLowerCase()));
+  const channelRoll = useVariants('channelRoll');
+  const rowScan = useStaggeredVariants('typeScan');
 
+  // Seeded by the server render, then kept current from the live stream so a
+  // tab left open picks up new/reordered tracks without a refresh.
+  const [tracks, setTracks] = useState(initialTracks);
+  const [categories, setCategories] = useState(initialCategories);
+  useEffect(() => setTracks(initialTracks), [initialTracks]);
+  useEffect(() => setCategories(initialCategories), [initialCategories]);
+
+  const reload = useCallback(async () => {
+    const [t, c] = await Promise.all([api.getTracks(), api.getCategories()]);
+    setTracks(t);
+    setCategories(c);
+  }, []);
+  useLiveChanges(reload);
+
+  const filtered = useMemo(
+    () =>
+      tracks.filter(
+        (t) =>
+          (category === ALL_CATEGORIES || t.category === category) &&
+          t.file.toLowerCase().includes(query.toLowerCase()),
+      ),
+    [tracks, category, query],
+  );
+
+  // Counts are of the category as a whole, not of the current search — a tab
+  // reading "0" only because of an unrelated search term would be misleading.
+  const counts = useMemo(() => {
+    const acc: Record<string, number> = { [ALL_CATEGORIES]: tracks.length };
+    for (const c of categories) acc[c.id] = 0;
+    for (const t of tracks) {
+      if (t.category && acc[t.category] !== undefined) acc[t.category] += 1;
+    }
+    return acc;
+  }, [tracks, categories]);
+
+  // Drives next/prev and LOOP ALL in the player, so it has to be the same list
+  // the visitor can actually see — otherwise auto-advance jumps to a track
+  // that isn't on screen.
+  const filteredFiles = useMemo(() => filtered.map((t) => t.file), [filtered]);
   useEffect(() => {
-    setFilteredFiles(filtered);
-  }, [filtered.join(',')]);
+    setFilteredFiles(filteredFiles);
+  }, [filteredFiles, setFilteredFiles]);
 
   return (
     <main id="main-content" className="crt-container">
       <Hero trackCount={tracks.length} />
 
       <SearchBox onSearch={setQuery} placeholder="SEARCH TRACKS..." />
+
+      <CategoryTabs
+        categories={categories}
+        active={category}
+        onChange={setCategory}
+        counts={counts}
+      />
 
       {(youtubeUrl || instagramUrl || facebookUrl) && (
         <div className="crt-social-bar">
@@ -96,7 +158,7 @@ export function TrackListPage({ tracks, siteName, youtubeUrl, instagramUrl, face
             gap: '0.75rem',
             padding: '0.4rem 0.75rem',
             borderBottom: '1px solid #8a5f00',
-            fontFamily: "'JetBrains Mono', monospace",
+            fontFamily: "var(--font-jetbrains-mono), monospace",
             fontSize: '10px',
             color: '#8a5f00',
             letterSpacing: '0.1em',
@@ -109,47 +171,93 @@ export function TrackListPage({ tracks, siteName, youtubeUrl, instagramUrl, face
           <span>STATUS</span>
         </div>
 
-        <AnimatePresence initial={false}>
-          {filtered.length === 0 ? (
-            <motion.div
-              key="empty"
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              style={{
-                padding: '2rem',
-                textAlign: 'center',
-                color: '#8a5f00',
-                fontFamily: "'JetBrains Mono', monospace",
-                fontSize: '12px',
-              }}
-              role="status"
-            >
-              &gt; NO TRACKS FOUND.
-            </motion.div>
-          ) : (
-            <motion.div
-              key="list"
-              variants={staggerContainer}
-              initial="hidden"
-              animate="visible"
-              role="list"
-            >
-              {filtered.map((file, i) => (
-                <div key={file} role="listitem">
-                  <TrackCard file={file} index={i + 1} />
-                </div>
-              ))}
-            </motion.div>
-          )}
+        {/* Two levels of presence, doing two different jobs — don't merge them:
+            - OUTER, keyed on category: one channel-roll for the whole field, so
+              switching category reads as a single event instead of N rows each
+              exiting on their own.
+            - INNER, keyed on file: per-row exits while the search query narrows
+              the list, where a whole-field roll would be far too much.
+
+            The outer wrapper MUST define its own `exit` (channelRoll does). The
+            note that used to be here was earned: staggerContainer defines no
+            exit, so wrapping the list in an AnimatePresence left framer waiting
+            forever on an exit that never resolved, and rows stuck in the DOM.
+            That is why the roll is a separate wrapper around staggerContainer
+            rather than staggerContainer itself. */}
+        {/* No `initial={false}` on this one either. AnimatePresence propagates it
+            through PresenceContext to every descendant, not just direct children —
+            so while it was set here, the row cascade below stayed suppressed no
+            matter what the inner AnimatePresence said. Letting it run means the
+            field also rolls in once on arrival, which is the effect you want on a
+            CRT anyway: the channel tuning in. */}
+        <AnimatePresence mode="wait">
+          <motion.div
+            key={category}
+            variants={channelRoll}
+            initial="hidden"
+            animate="visible"
+            exit="exit"
+          >
+            {/* Plain div: this used to carry `staggerContainer`, but its
+                staggerChildren never reached the rows through the AnimatePresence
+                below, so it orchestrated nothing. The cascade is an explicit
+                per-row delay now — see the transition on each listitem. */}
+            <div role="list">
+              {/* No `initial={false}` here on purpose. It used to suppress the
+                  rows' enter animation on first mount, so the main content of the
+                  page — the list itself — appeared instantly and the site read as
+                  completely static. Rows now cascade in on load. Later adds
+                  (search narrowing, live changes) animate either way; this only
+                  changes the first render. */}
+              <AnimatePresence>
+                {filtered.map((track, i) => (
+                  // typeScan lives HERE rather than inside TrackCard: variant
+                  // labels do not survive the trip down through this
+                  // AnimatePresence into a plain child component, so when the
+                  // variants sat on TrackCard's <article> the rows rendered with
+                  // no clip-path at all.
+                  <motion.div
+                    key={track.file}
+                    role="listitem"
+                    variants={rowScan}
+                    // `custom` feeds the row index to the variant, which is where
+                    // the stagger delay has to live — see useStaggeredVariants.
+                    custom={i}
+                    initial="hidden"
+                    animate="visible"
+                    exit="exit"
+                  >
+                    <TrackCard file={track.file} index={i + 1} />
+                  </motion.div>
+                ))}
+              </AnimatePresence>
+            </div>
+          </motion.div>
         </AnimatePresence>
+
+        {filtered.length === 0 && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            style={{
+              padding: '2rem',
+              textAlign: 'center',
+              color: '#8a5f00',
+              fontFamily: "var(--font-jetbrains-mono), monospace",
+              fontSize: '12px',
+            }}
+            role="status"
+          >
+            &gt; NO TRACKS FOUND.
+          </motion.div>
+        )}
       </div>
 
       <footer
         style={{
           marginTop: '2rem',
           textAlign: 'center',
-          fontFamily: "'JetBrains Mono', monospace",
+          fontFamily: "var(--font-jetbrains-mono), monospace",
           fontSize: '10px',
           color: '#8a5f00',
           letterSpacing: '0.08em',

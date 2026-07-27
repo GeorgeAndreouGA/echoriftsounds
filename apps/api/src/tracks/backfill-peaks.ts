@@ -15,12 +15,12 @@ async function main(): Promise<void> {
   const storage = app.get(StorageService);
   const peaks = app.get(PeaksService);
 
-  const files = await storage.published.read();
-  console.log(`[backfill-peaks] ${files.length} published tracks`);
+  const tracks = await storage.published.read();
+  console.log(`[backfill-peaks] ${tracks.length} published tracks`);
 
   let ok = 0;
   let fail = 0;
-  for (const file of files) {
+  for (const { file } of tracks) {
     try {
       const t0 = Date.now();
       await peaks.ensure(file);

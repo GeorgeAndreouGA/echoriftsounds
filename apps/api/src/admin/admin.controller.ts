@@ -15,20 +15,43 @@ import { Request, Response } from 'express';
 import { Throttle } from '@nestjs/throttler';
 import { Observable, concat, defer, of } from 'rxjs';
 import { map } from 'rxjs/operators';
-import { ScheduledTrack } from '@echorift/shared';
 import { IpWhitelistGuard } from '../auth/ip-whitelist.guard';
 import { BasicAuthGuard } from '../auth/basic-auth.guard';
 import { SessionGuard, SESSION_COOKIE } from '../auth/session.guard';
+import { SessionStore } from '../auth/session-store.service';
 import { Public } from '../auth/public.decorator';
 import { generateCsrfToken } from '../auth/csrf';
 import { AdminService } from './admin.service';
+import {
+  AssignCategoryDto,
+  CancelPeaksDto,
+  CreateCategoryDto,
+  DeleteCategoriesDto,
+  DeleteDto,
+  PublishDto,
+  RenameCategoryDto,
+  ReorderDto,
+  ScheduledDeleteDto,
+} from './admin.dto';
+import { CategoriesService } from '../categories/categories.service';
 import { StorageService } from '../storage/storage.service';
 import {
   PeaksProgressService,
   PeaksProgressSnapshot,
 } from '../tracks/peaks-progress.service';
 
-const SESSION_MAX_AGE_MS = 8 * 60 * 60 * 1000; // 8 hours
+// How long a login lasts before the cookie expires and the admin must sign in
+// again. Tunable via SESSION_HOURS in .env; falls back to 2h if unset or not a
+// positive number (a typo must not silently mint an eternal session).
+const SESSION_MAX_AGE_MS = (() => {
+  const hours = Number(process.env.SESSION_HOURS);
+  return (Number.isFinite(hours) && hours > 0 ? hours : 2) * 60 * 60 * 1000;
+})();
+
+// Scope the session cookie to the admin API under the configured subpath
+// (e.g. '/music/api/admin'). Must match the path the browser actually hits, or
+// the cookie is never sent back. Mirrors BASE_PATH used in main.ts.
+const COOKIE_PATH = `${(process.env.BASE_PATH || '').replace(/\/+$/, '')}/api/admin`;
 
 // `secure` is computed from `req.secure` (driven by X-Forwarded-Proto via the
 // trust-proxy chain in main.ts) rather than NODE_ENV. Plain-HTTP deployments
@@ -40,7 +63,7 @@ function sessionCookieOpts(req: Request) {
     secure: req.secure,
     sameSite: 'strict' as const,
     signed: true,
-    path: '/api/admin',
+    path: COOKIE_PATH,
     maxAge: SESSION_MAX_AGE_MS,
   };
 }
@@ -52,8 +75,10 @@ function sessionCookieOpts(req: Request) {
 export class AdminController {
   constructor(
     private readonly adminService: AdminService,
+    private readonly categories: CategoriesService,
     private readonly storage: StorageService,
     private readonly peaksProgress: PeaksProgressService,
+    private readonly sessions: SessionStore,
   ) {}
 
   // Server-Sent Events stream of peaks-generation progress. The first event
@@ -80,7 +105,10 @@ export class AdminController {
   @ApiOperation({ summary: 'Login with Basic auth — sets session cookie and returns CSRF token' })
   @ApiOkResponse({ description: '{ ok: true, csrfToken: string }' })
   login(@Req() req: Request, @Res({ passthrough: true }) res: Response) {
-    res.cookie(SESSION_COOKIE, 'ok', sessionCookieOpts(req));
+    // Mint a server-side session; the cookie carries its random id, not a
+    // constant, so it can be revoked on logout and dies on restart.
+    const sessionId = this.sessions.create(SESSION_MAX_AGE_MS);
+    res.cookie(SESSION_COOKIE, sessionId, sessionCookieOpts(req));
     const csrfToken = generateCsrfToken(req, res, { secure: req.secure });
     return { ok: true, csrfToken };
   }
@@ -89,8 +117,12 @@ export class AdminController {
   @Public()
   @ApiOperation({ summary: 'Logout — clears session cookie' })
   @ApiOkResponse({ description: '{ ok: true }' })
-  logout(@Res({ passthrough: true }) res: Response) {
-    res.clearCookie(SESSION_COOKIE, { path: '/api/admin' });
+  logout(@Req() req: Request, @Res({ passthrough: true }) res: Response) {
+    // Revoke server-side first, so the cookie is dead even if the client keeps a
+    // copy — clearCookie alone left a captured cookie valid until it expired.
+    const value = req.signedCookies?.[SESSION_COOKIE];
+    if (typeof value === 'string') this.sessions.destroy(value);
+    res.clearCookie(SESSION_COOKIE, { path: COOKIE_PATH });
     return { ok: true };
   }
 
@@ -111,15 +143,9 @@ export class AdminController {
 
   @Post('publish')
   @ApiOperation({ summary: 'Publish files immediately or schedule them for a future release' })
-  @ApiBody({ schema: { properties: { files: { oneOf: [{ type: 'string' }, { type: 'array', items: { type: 'string' } }] }, scheduled: { description: 'ScheduledTrack or array' } } } })
+  @ApiBody({ schema: { properties: { files: { oneOf: [{ type: 'string' }, { type: 'array', items: { type: 'string' } }] }, scheduled: { description: 'ScheduledTrack or array' }, category: { type: 'string', nullable: true, description: 'Category id applied to the whole batch' } } } })
   @ApiOkResponse({ description: '{ ok: true }' })
-  async publish(
-    @Body()
-    body: {
-      files?: string | string[];
-      scheduled?: ScheduledTrack | ScheduledTrack[];
-    },
-  ) {
+  async publish(@Body() body: PublishDto) {
     if (!body.files && !body.scheduled) {
       throw new BadRequestException('No files to publish or schedule');
     }
@@ -131,7 +157,7 @@ export class AdminController {
         : [body.scheduled]
       : [];
 
-    await this.adminService.publish(immed, sched);
+    await this.adminService.publish(immed, sched, body.category ?? null);
     return { ok: true };
   }
 
@@ -139,7 +165,7 @@ export class AdminController {
   @ApiOperation({ summary: 'Unpublish (remove) tracks from the published list' })
   @ApiBody({ schema: { properties: { filesToDelete: { oneOf: [{ type: 'string' }, { type: 'array', items: { type: 'string' } }] } } } })
   @ApiOkResponse({ description: '{ ok: true }' })
-  async unpublish(@Body() body: { filesToDelete?: string | string[] }) {
+  async unpublish(@Body() body: DeleteDto) {
     const toDelete = body.filesToDelete
       ? Array.isArray(body.filesToDelete)
         ? body.filesToDelete
@@ -153,7 +179,7 @@ export class AdminController {
   @ApiOperation({ summary: 'Remove tracks from the scheduled release queue' })
   @ApiBody({ schema: { properties: { scheduledToDelete: { oneOf: [{ type: 'string' }, { type: 'array', items: { type: 'string' } }] } } } })
   @ApiOkResponse({ description: '{ ok: true }' })
-  async removeScheduled(@Body() body: { scheduledToDelete?: string | string[] }) {
+  async removeScheduled(@Body() body: ScheduledDeleteDto) {
     const toDelete = body.scheduledToDelete
       ? Array.isArray(body.scheduledToDelete)
         ? body.scheduledToDelete
@@ -167,7 +193,7 @@ export class AdminController {
   @ApiOperation({ summary: 'Abort an in-flight or retrying peaks-generation job' })
   @ApiBody({ schema: { properties: { files: { oneOf: [{ type: 'string' }, { type: 'array', items: { type: 'string' } }] } } } })
   @ApiOkResponse({ description: '{ ok: true }' })
-  async cancelPeaks(@Body() body: { files?: string | string[] }) {
+  async cancelPeaks(@Body() body: CancelPeaksDto) {
     const files = body.files
       ? Array.isArray(body.files)
         ? body.files
@@ -185,9 +211,76 @@ export class AdminController {
   }
 
   @Get('published')
-  @ApiOperation({ summary: 'Get the list of currently published tracks' })
-  @ApiOkResponse({ description: 'Array of published filenames', type: [String] })
+  @ApiOperation({ summary: 'Get the currently published tracks, in display order' })
+  @ApiOkResponse({ description: 'Array of { file, category, position }' })
   async getPublished() {
+    // Already ordered by `position` via migratePublished — re-sorting here would
+    // fight the admin's manual arrangement.
     return this.storage.published.read();
+  }
+
+  @Get('categories')
+  @ApiOperation({ summary: 'List categories' })
+  @ApiOkResponse({ description: 'Array of { id, name }' })
+  async getCategories() {
+    return this.categories.list();
+  }
+
+  @Post('categories')
+  @ApiOperation({ summary: 'Create a category' })
+  @ApiBody({ schema: { properties: { name: { type: 'string' } } } })
+  @ApiOkResponse({ description: 'The created { id, name }' })
+  async createCategory(@Body() body: CreateCategoryDto) {
+    if (!body?.name) {
+      throw new BadRequestException('Category name is required');
+    }
+    return this.categories.create(body.name);
+  }
+
+  @Post('categories/rename')
+  @ApiOperation({ summary: 'Rename a category (its id, and so its track links, are preserved)' })
+  @ApiBody({ schema: { properties: { id: { type: 'string' }, name: { type: 'string' } } } })
+  @ApiOkResponse({ description: 'The updated { id, name }' })
+  async renameCategory(@Body() body: RenameCategoryDto) {
+    if (!body?.id || !body?.name) {
+      throw new BadRequestException('Category id and name are required');
+    }
+    return this.categories.rename(body.id, body.name);
+  }
+
+  @Post('categories/delete')
+  @ApiOperation({ summary: 'Delete categories; refused if any still has tracks' })
+  @ApiBody({ schema: { properties: { ids: { oneOf: [{ type: 'string' }, { type: 'array', items: { type: 'string' } }] } } } })
+  @ApiOkResponse({ description: '{ ok: true }' })
+  async deleteCategories(@Body() body: DeleteCategoriesDto) {
+    const ids = body.ids ? (Array.isArray(body.ids) ? body.ids : [body.ids]) : [];
+    await this.categories.remove(ids);
+    return { ok: true };
+  }
+
+  @Post('tracks/category')
+  @ApiOperation({ summary: 'Move published tracks into a category (required)' })
+  @ApiBody({ schema: { properties: { files: { oneOf: [{ type: 'string' }, { type: 'array', items: { type: 'string' } }] }, category: { type: 'string' } } } })
+  @ApiOkResponse({ description: '{ ok: true }' })
+  async assignCategory(@Body() body: AssignCategoryDto) {
+    const files = body.files ? (Array.isArray(body.files) ? body.files : [body.files]) : [];
+    if (files.length === 0) {
+      throw new BadRequestException('No files given');
+    }
+    await this.adminService.assignCategory(files, body.category ?? null);
+    return { ok: true };
+  }
+
+  @Post('tracks/reorder')
+  @ApiOperation({ summary: 'Set the display order of published tracks' })
+  @ApiBody({ schema: { properties: { files: { type: 'array', items: { type: 'string' } } } } })
+  @ApiOkResponse({ description: '{ ok: true }' })
+  async reorder(@Body() body: ReorderDto) {
+    const files = Array.isArray(body.files) ? body.files : [];
+    if (files.length === 0) {
+      throw new BadRequestException('No files given');
+    }
+    await this.adminService.reorder(files);
+    return { ok: true };
   }
 }

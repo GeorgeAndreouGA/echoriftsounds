@@ -2,7 +2,9 @@
 
 interface Props {
   checked: boolean;
-  onChange: (checked: boolean) => void;
+  /** `mods.shift` is true for Shift+click and Shift+Space/Enter — callers that
+   *  don't do ranges can ignore the second argument entirely. */
+  onChange: (checked: boolean, mods: { shift: boolean }) => void;
   ariaLabel: string;
   variant?: 'amber' | 'red';
 }
@@ -17,19 +19,36 @@ export function CrtCheckbox({ checked, onChange, ariaLabel, variant = 'amber' }:
       role="checkbox"
       aria-checked={checked}
       aria-label={ariaLabel}
-      onClick={() => onChange(!checked)}
+      aria-keyshortcuts="Shift+Space"
+      onClick={(e) => onChange(!checked, { shift: e.shiftKey })}
+      // Shift+click natively extends the document text selection, which paints
+      // the whole row list highlighted the moment you start a range. Suppressing
+      // it on mousedown does not stop the click that follows.
+      onMouseDown={(e) => {
+        if (e.shiftKey) e.preventDefault();
+      }}
+      // The keyboard equivalent of a shift-click. Handled explicitly rather than
+      // relying on the synthesized click carrying the modifier, which Safari has
+      // historically not done; preventDefault stops the double toggle.
+      onKeyDown={(e) => {
+        if (e.shiftKey && !e.repeat && (e.key === ' ' || e.key === 'Enter')) {
+          e.preventDefault();
+          onChange(!checked, { shift: true });
+        }
+      }}
+      className="cur-pointer"
       style={{
         background: 'transparent',
         border: 'none',
         padding: 0,
-        cursor: 'pointer',
-        fontFamily: "'JetBrains Mono', monospace",
+        fontFamily: "var(--font-jetbrains-mono), monospace",
         fontSize: '11px',
         color,
         lineHeight: 1,
         letterSpacing: '0.04em',
         outline: 'none',
         flexShrink: 0,
+        userSelect: 'none',
       }}
       onFocus={(e) => {
         (e.currentTarget as HTMLElement).style.outline = `1px solid ${color}`;

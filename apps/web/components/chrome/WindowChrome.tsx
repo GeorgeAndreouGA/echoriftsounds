@@ -1,7 +1,9 @@
 'use client';
 
 import { motion } from 'framer-motion';
-import { scanWipe } from '../motion/glitch';
+import { useVariants } from '../motion/variants';
+import { useMotionTier } from '../../lib/motion/useMotionTier';
+import { StatusDot, WindowDots } from '../icons/CrtIcons';
 
 interface Props {
   title?: string;
@@ -10,13 +12,17 @@ interface Props {
 }
 
 export function WindowChrome({ title = 'terminal', children, delay = 0 }: Props) {
+  const scanWipe = useVariants('scanWipe');
+  const tier = useMotionTier();
 
   return (
     <motion.section
       variants={scanWipe}
       initial="hidden"
       animate="visible"
-      transition={{ delay }}
+      // The stagger is motion too: on 'none' the variants are instant, but an
+      // un-gated delay would still deal the panels in one at a time.
+      transition={{ delay: tier === 'none' ? 0 : delay }}
       style={{ marginBottom: '1.5rem' }}
     >
       {/* Titlebar */}
@@ -29,14 +35,14 @@ export function WindowChrome({ title = 'terminal', children, delay = 0 }: Props)
           background: '#0a0b06',
           border: '1px solid #ffb000',
           borderBottom: 'none',
-          fontFamily: "'JetBrains Mono', monospace",
+          fontFamily: "var(--font-jetbrains-mono), monospace",
           fontSize: '11px',
           color: '#8a5f00',
           letterSpacing: '0.06em',
           userSelect: 'none',
         }}
       >
-        <span>● ○ ○</span>
+        <WindowDots />
         <span style={{ flex: 1, textAlign: 'center', color: '#ffb000' }}>
           admin.echorift.local — {title}
         </span>
@@ -46,11 +52,12 @@ export function WindowChrome({ title = 'terminal', children, delay = 0 }: Props)
           aria-label="Terminal active"
           style={{
             color: '#39ff14',
-            fontSize: '10px',
+            display: 'inline-flex',
+            alignItems: 'center',
             animation: 'blink 2s step-start infinite',
           }}
         >
-          ◉
+          <StatusDot />
         </span>
       </div>
 

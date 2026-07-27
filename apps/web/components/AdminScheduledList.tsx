@@ -2,40 +2,60 @@
 
 import { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import type { ScheduledTrack } from '@echorift/shared';
+import { DUR, EASE, s } from './motion/tokens';
+import type { Category, ScheduledTrack } from '@echorift/shared';
 import * as api from '../lib/api';
+import { useMultiSelect } from '../hooks/useMultiSelect';
 import { SearchBox } from './SearchBox';
 import { CrtCheckbox } from './CrtCheckbox';
+import { CrtSelectionBar } from './CrtSelectionBar';
 import { Countdown } from './Countdown';
 
 interface Props {
   items: ScheduledTrack[];
+  categories: Category[];
   csrfToken: string;
   onSuccess: () => void;
 }
 
 
-export function AdminScheduledList({ items, csrfToken, onSuccess }: Props) {
-  const [selected, setSelected] = useState<string[]>([]);
+export function AdminScheduledList({ items, categories, csrfToken, onSuccess }: Props) {
+  const categoryName = (id: string | null | undefined) =>
+    (id && categories.find((c) => c.id === id)?.name) || 'NEEDS CATEGORY';
+
   const [search, setSearch] = useState('');
   const [error, setError] = useState('');
   const [removing, setRemoving] = useState<string[]>([]);
 
   const filtered = items.filter((item) => item.file.toLowerCase().includes(search.toLowerCase()));
 
-  const toggle = (file: string, checked: boolean) =>
-    setSelected((prev) => (checked ? [...prev, file] : prev.filter((f) => f !== file)));
+  const sel = useMultiSelect({
+    all: items.map((item) => item.file),
+    visible: filtered.map((item) => item.file),
+  });
+
+  // Scheduled entries have no stored position — the array is append order — so
+  // rows are numbered 1..N over what is currently on screen, and a typed range
+  // means exactly the numbers rendered beside those rows.
+  const applyRange = (numbers: number[], additive: boolean) => {
+    const files = numbers
+      .map((n) => filtered[n - 1]?.file)
+      .filter((f): f is string => f !== undefined);
+    (additive ? sel.add : sel.replace)(files);
+    return { matched: files.length, missing: numbers.length - files.length };
+  };
 
   const handleRemove = async () => {
-    if (selected.length === 0 || !csrfToken) {
+    const targets = sel.selected;
+    if (targets.length === 0 || !csrfToken) {
       setError(csrfToken ? 'Nothing selected.' : 'Session expired.');
       return;
     }
-    setRemoving(selected);
+    setRemoving(targets);
     setTimeout(async () => {
       try {
-        await api.removeScheduled(selected, csrfToken);
-        setSelected([]);
+        await api.removeScheduled(targets, csrfToken);
+        sel.clear();
         onSuccess();
       } catch (err) {
         setError((err as Error).message);
@@ -50,6 +70,16 @@ export function AdminScheduledList({ items, csrfToken, onSuccess }: Props) {
       <div className="crt-section-title">SCHEDULED TRACKS</div>
       <SearchBox onSearch={setSearch} placeholder="Filter scheduled..." />
 
+      <CrtSelectionBar
+        count={sel.count}
+        totalVisible={filtered.length}
+        allVisibleSelected={sel.allVisibleSelected}
+        onSelectAll={sel.selectAll}
+        onClear={sel.clear}
+        onApplyRange={applyRange}
+        disabled={removing.length > 0}
+      />
+
       <div className="crt-file-list" role="list" aria-label="Scheduled tracks">
         {filtered.length === 0 && (
           <div
@@ -57,7 +87,7 @@ export function AdminScheduledList({ items, csrfToken, onSuccess }: Props) {
               padding: '1rem',
               textAlign: 'center',
               color: '#8a5f00',
-              fontFamily: "'JetBrains Mono', monospace",
+              fontFamily: "var(--font-jetbrains-mono), monospace",
               fontSize: '11px',
             }}
             role="status"
@@ -66,7 +96,7 @@ export function AdminScheduledList({ items, csrfToken, onSuccess }: Props) {
           </div>
         )}
         <AnimatePresence>
-          {filtered.map((item) => (
+          {filtered.map((item, i) => (
             <motion.div
               key={item.file}
               role="listitem"
@@ -77,8 +107,8 @@ export function AdminScheduledList({ items, csrfToken, onSuccess }: Props) {
                 x: 0,
                 filter: removing.includes(item.file) ? 'saturate(4) hue-rotate(90deg)' : 'none',
               }}
-              exit={{ opacity: 0, scaleY: 0, filter: 'saturate(4) hue-rotate(90deg)', transition: { duration: 0.3 } }}
-              transition={{ duration: 0.2 }}
+              exit={{ opacity: 0, scaleY: 0, filter: 'saturate(4) hue-rotate(90deg)', transition: { duration: s(DUR.d4), ease: [...EASE.kill] } }}
+              transition={{ duration: s(DUR.d3), ease: [...EASE.snap] }}
               style={{
                 display: 'flex',
                 alignItems: 'center',
@@ -86,15 +116,18 @@ export function AdminScheduledList({ items, csrfToken, onSuccess }: Props) {
                 gap: '0.5rem',
                 padding: '0.4rem 0.6rem',
                 borderBottom: '1px solid #1a1f12',
-                fontFamily: "'JetBrains Mono', monospace",
+                fontFamily: "var(--font-jetbrains-mono), monospace",
                 fontSize: '11px',
                 color: '#ffb000',
               }}
             >
+              <span style={{ color: '#8a5f00', minWidth: '2rem', flexShrink: 0 }}>
+                {String(i + 1).padStart(3, '0')}
+              </span>
               <div style={{ display: 'flex', alignItems: 'center', gap: '0.3rem', flex: 1, minWidth: 0 }}>
                 <CrtCheckbox
-                  checked={selected.includes(item.file)}
-                  onChange={(v) => toggle(item.file, v)}
+                  checked={sel.has(item.file)}
+                  onChange={(v, mods) => sel.toggle(item.file, v, mods.shift)}
                   ariaLabel={`Select ${item.file} for removal`}
                   variant="red"
                 />
@@ -102,6 +135,16 @@ export function AdminScheduledList({ items, csrfToken, onSuccess }: Props) {
                   {item.file}
                 </span>
               </div>
+              <span
+                style={{
+                  color: item.category ? '#8a5f00' : '#ff3b3b',
+                  fontSize: '10px',
+                  flexShrink: 0,
+                  letterSpacing: '0.06em',
+                }}
+              >
+                {categoryName(item.category).toUpperCase()}
+              </span>
               <Countdown time={item.time} />
               <span style={{ color: '#8a5f00', fontSize: '10px', flexShrink: 0 }}>
                 {new Date(item.time).toLocaleString()}
@@ -121,7 +164,7 @@ export function AdminScheduledList({ items, csrfToken, onSuccess }: Props) {
         <button
           className="crt-btn danger"
           onClick={handleRemove}
-          disabled={!csrfToken || selected.length === 0}
+          disabled={!csrfToken || sel.count === 0}
         >
           [ REMOVE SELECTED ]
         </button>

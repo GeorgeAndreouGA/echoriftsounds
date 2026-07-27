@@ -53,15 +53,20 @@ FROM node:22-alpine AS api-runner
 WORKDIR /app
 # ffmpeg + ffprobe are used by PeaksService to decode audio and extract
 # per-second peak amplitudes without loading the full file into memory.
+#
+# Least privilege: the runtime identity is the base image's unprivileged `node`
+# user (uid/gid 1000) — the same uid the compose `user:` sets and that owns the
+# data volume, so there is one non-root identity instead of the old 1000/1001
+# split. The data dirs are 700 (owner-only). App code is copied root-owned and
+# only world-readable below, so the runtime user can execute it but never write
+# it, even if the read-only rootfs were ever removed.
 RUN apk add --no-cache ffmpeg \
- && addgroup --system --gid 1001 nodejs \
- && adduser  --system --uid 1001 nodejs \
  && mkdir -p /app/data /app/data/peaks /app/music \
- && chown -R nodejs:nodejs /app/data \
- && chmod 755 /app/data /app/data/peaks /app/music
-COPY --from=api-build --chown=nodejs:nodejs /deploy/node_modules ./node_modules
-COPY --from=api-build --chown=nodejs:nodejs /deploy/dist          ./dist
-USER nodejs
+ && chown -R node:node /app/data \
+ && chmod 700 /app/data /app/data/peaks
+COPY --from=api-build --chown=root:root /deploy/node_modules ./node_modules
+COPY --from=api-build --chown=root:root /deploy/dist          ./dist
+USER node
 ENV NODE_ENV=production
 CMD ["node", "dist/main.js"]
 
@@ -69,19 +74,29 @@ CMD ["node", "dist/main.js"]
 FROM shared-build AS web-build
 ARG API_INTERNAL_URL=http://localhost:3001
 ENV API_INTERNAL_URL=$API_INTERNAL_URL
+# Subpath the app is served under (e.g. /music). Next bakes basePath + every
+# client-side URL prefix at build time, so this must be a build arg, not runtime.
+ARG BASE_PATH=
+ENV NEXT_PUBLIC_BASE_PATH=$BASE_PATH
 COPY apps/web/ apps/web/
+# The motion scale is duplicated between components/motion/tokens.ts (framer needs
+# literal numbers) and globals.css (@keyframes need literal custom properties).
+# Fail here rather than shipping a split-brain scale — see tokens.ts.
+RUN node apps/web/scripts/check-motion-tokens.mjs
 RUN --mount=type=cache,id=next-cache,target=/workspace/apps/web/.next/cache \
     pnpm --filter @echorift/web build
 
 # ---- web-runner ----
 FROM node:22-alpine AS web-runner
 WORKDIR /app
-RUN addgroup --system --gid 1001 nodejs \
- && adduser  --system --uid 1001 nodejs
-COPY --from=web-build --chown=nodejs:nodejs /workspace/apps/web/.next/standalone ./
-COPY --from=web-build --chown=nodejs:nodejs /workspace/apps/web/.next/static    ./apps/web/.next/static
-COPY --from=web-build --chown=nodejs:nodejs /workspace/apps/web/public           ./apps/web/public
-USER nodejs
+# Same least-privilege posture as api-runner: code owned by root and only
+# world-readable, served by the base image's unprivileged `node` user (uid 1000).
+# The Next standalone server writes nothing under /app at runtime (rootfs is
+# read-only; scratch goes to the tmpfs /tmp), so it needs no writable path here.
+COPY --from=web-build --chown=root:root /workspace/apps/web/.next/standalone ./
+COPY --from=web-build --chown=root:root /workspace/apps/web/.next/static    ./apps/web/.next/static
+COPY --from=web-build --chown=root:root /workspace/apps/web/public           ./apps/web/public
+USER node
 ENV NODE_ENV=production
 ENV PORT=3000
 ENV HOSTNAME=0.0.0.0

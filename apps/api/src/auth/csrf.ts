@@ -9,6 +9,10 @@ const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 // the password). The session cookie is HttpOnly + SameSite=strict, so a
 // cross-origin login attempt cannot read the response either.
 const CSRF_EXEMPT_PATHS = new Set(['/login']);
+// Browser-facing cookie path: must carry the subpath (e.g. /music/api/admin)
+// so the secret cookie is sent back on admin requests. Mirrors COOKIE_PATH in
+// admin.controller.ts and the csrfMiddleware mount point in main.ts.
+const COOKIE_PATH = `${(process.env.BASE_PATH || '').replace(/\/+$/, '')}/api/admin`;
 
 interface CookieFlags {
   secure: boolean;
@@ -47,7 +51,7 @@ function ensureSecret(req: Request, res: Response, flags: CookieFlags): string {
     secure: flags.secure,
     sameSite: 'strict',
     signed: true,
-    path: '/api/admin',
+    path: COOKIE_PATH,
   });
   // Make available within the same request for token minting after the cookie is set.
   (req.signedCookies as Record<string, string>)[SECRET_COOKIE] = secret;
