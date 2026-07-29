@@ -334,33 +334,87 @@ Defined in `.env` at the repo root (loaded via `env_file` in `docker-compose.yml
 
 ### Generating the secrets
 
-Both commands run inside the API image, so there is nothing to install on the
-host — the app's own `bcryptjs` does the hashing, which guarantees the hash
-matches what `bcrypt.compare` will verify against at login.
-
-**`ADMIN_PASSWORD_HASH`** — bcrypt, cost 12. Replace the password, then paste
-the whole `$2a$12$…` string into `.env`:
+**`ADMIN_PASSWORD_HASH`** — bcrypt, cost 12. Generate it on the host with
+`htpasswd`; no container needed:
 
 ```bash
-docker compose run --rm --no-deps --entrypoint node api \
-  -e "console.log(require('bcryptjs').hashSync('your-password-here', 12))"
-# → $2a$12$JFm.hC3vvdHylAZws/4ooOZVWndj2t4uqTwn2vzSO4NAwlaQDHYHS
+apt-get install -y apache2-utils        # once (Debian/Ubuntu)
+htpasswd -nBC 12 "" | cut -d: -f2
+# → $2y$12$JFm.hC3vvdHylAZws/4ooOZVWndj2t4uqTwn2vzSO4NAwlaQDHYHS
 ```
 
-Typing the password as a shell argument leaves it in your shell history. To
-avoid that, prefix the command with a space (if your shell honours
-`HISTCONTROL=ignorespace`), or clear the entry afterwards.
+It prompts for the password twice with no echo. `-B` selects bcrypt and `-C 12`
+sets the cost — **both are required**, since `htpasswd`'s default is MD5-crypt
+and its default bcrypt cost is 5. The empty `""` username leaves a leading `:`
+on the output, which `cut` strips.
 
-**`COOKIE_SECRET`** — 32 random bytes, hex. Any high-entropy string works:
+The `$2y$` prefix is expected and correct. `htpasswd` emits `$2y$` and Python's
+`bcrypt` emits `$2b$`, while the app's `bcryptjs` emits `$2a$`; all three are
+the same algorithm and `bcrypt.compare` accepts every one of them, so any of
+these tools produces a hash the login endpoint verifies.
+
+Paste the whole string into `.env`, then apply it:
+
+```bash
+docker compose up -d api
+```
+
+**`docker compose restart api` will not work** — `restart` reuses the existing
+container's environment and never re-reads `env_file`, so the old hash stays
+live and login keeps failing with the previous password.
+
+#### Never pass the password as a shell argument
+
+This is the one way this step reliably goes wrong. Inside double quotes the
+shell expands `$`, backticks and `\` *before* the hashing tool sees the string,
+so a password like `Sup3r$ecret` gets silently hashed as `Sup3r` (the shell
+substitutes the undefined `$ecret` with nothing). The result is a perfectly
+valid bcrypt hash of the wrong string — and login then fails with a `401` on
+the correct password, which looks identical to a typo.
+
+Avoid `htpasswd -b` (password on the command line) for the same reason, plus it
+leaves the password in your shell history.
+
+Two alternatives that are equally safe, both reading the password from stdin
+rather than from `argv`:
+
+```bash
+# Python, if python3-bcrypt is installed
+python3 -c 'import bcrypt,getpass;print(bcrypt.hashpw(getpass.getpass().encode(),bcrypt.gensalt(12)).decode())'
+
+# The app's own bcryptjs, inside the API image — nothing to install on the host.
+# Prints the byte length too, so you can confirm the shell didn't eat anything.
+read -rs -p 'password: ' PW && printf '%s' "$PW" | docker compose run --rm --no-deps -T --entrypoint node api \
+  -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{console.log("bytes:",Buffer.byteLength(s));console.log(require("bcryptjs").hashSync(s,12))})'; unset PW
+```
+
+To check an existing hash against a password without guessing at the login
+form — useful when `.env` and the running container may have drifted apart,
+since this reads the environment of the *live* container:
+
+```bash
+read -rs -p 'password: ' PW && printf '%s' "$PW" | docker compose exec -T api node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const h=process.env.ADMIN_PASSWORD_HASH||"";console.log("user:",JSON.stringify(process.env.ADMIN_USERNAME),"hash:",h.slice(0,7),h.length,"match:",require("bcryptjs").compareSync(s,h))})'; unset PW
+# → user: "admin" hash: $2y$12$ 60 match: true
+```
+
+`match: false` means the container's hash does not correspond to that password —
+re-generate it above. A `hash:` length other than `60` means `.env` mangled the
+value.
+
+**`COOKIE_SECRET`** — 32 random bytes, hex. Any high-entropy string works, and
+this one is safe to run as a plain command since no password is involved:
+
+```bash
+openssl rand -hex 32
+# → 61502ce2989a778e003b00e7280487a737c18352ced726195b778a37d6a6c9bc
+```
+
+If `openssl` isn't on the host, the API image can do it instead:
 
 ```bash
 docker compose run --rm --no-deps --entrypoint node api \
   -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
-# → 61502ce2989a778e003b00e7280487a737c18352ced726195b778a37d6a6c9bc
 ```
-
-`openssl rand -hex 32` produces an equivalent value if you would rather not go
-through Docker.
 
 Then apply them:
 
