@@ -12,8 +12,8 @@ import { Injectable } from '@nestjs/common';
 export const FFMPEG_CONCURRENCY = 2;
 
 /**
- * The single gate every ffmpeg spawn in the app passes through — peaks decode
- * and stream transcode alike, whether the caller is the publish pipeline or an
+ * The single gate every ffmpeg spawn in the app passes through — currently
+ * just peaks decode, whether the caller is the publish pipeline or an
  * anonymous HTTP request.
  *
  * It exists because bounding only the publish pipeline is not enough: the

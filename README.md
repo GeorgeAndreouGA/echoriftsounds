@@ -1,15 +1,16 @@
 # EchoRiftSounds
 
-Self-hosted audio library and streaming site for long-form audio (multi-hour DJ mixes and sets). Tracks stream straight from disk over HTTP Range — so seeking and multi-hour playback work on a single connection — behind a CRT-terminal-themed web UI. An IP-restricted admin panel publishes, schedules, and manages the library.
+Self-hosted audio library for long-form audio (multi-hour DJ mixes and sets). Playback is YouTube-backed — each track is published with the YouTube video it plays through — behind a CRT-terminal-themed web UI that draws its own waveform scrubber over it; downloading the original file is a separate, always-available path straight off disk over HTTP Range. An IP-restricted admin panel publishes, schedules, and manages the library.
 
 The whole app is served under a configurable URL subpath (default **`/music`**), so it can live at `https://your-domain.com/music` alongside other apps on the same domain.
 
 ## What it does
 
-- **Public site** (`/music`) — browse and play published tracks in a retro CRT interface, with waveform scrubbing (wavesurfer.js) and direct download.
-- **Audio streaming** (`/music/audio/<file>`) — served from disk with HTTP Range support, immutable caching, and long keep-alive for multi-hour single-socket playback/downloads.
-- **Waveforms** — `ffmpeg` pre-computes per-second peaks server-side so the browser renders waveforms without decoding whole files. Generation progress streams live to the admin panel over SSE.
-- **Admin panel** (`/music/admin`) — log in to publish/unpublish tracks, schedule tracks to go live later, cancel peak jobs, and watch peak-generation progress. IP-allowlisted.
+- **Public site** (`/music`) — browse and play published tracks in a retro CRT interface: a YouTube player drives playback, with a hand-drawn waveform scrubber (wavesurfer.js, peaks only — see below) and custom CRT controls laid over it, plus a direct download of the original file.
+- **YouTube-backed playback** — each track is published with the YouTube video that plays it; the admin panel requires one at publish/schedule time and can fix it later if the link rots. A track with no link yet (only possible on data from before this existed) shows as unplayable until backfilled.
+- **Audio download** (`/music/audio/<file>`) — the original file, served from disk with HTTP Range support, immutable caching, and long keep-alive. This is the download button's path; playback never streams the file itself.
+- **Waveforms** — `ffmpeg` pre-computes per-second peaks server-side so the browser renders a waveform without decoding or streaming the whole file; wavesurfer draws them and reports scrub gestures, but the YouTube player is what actually plays. Generation progress streams live to the admin panel over SSE.
+- **Admin panel** (`/music/admin`) — log in to publish/unpublish tracks, attach or fix YouTube links, schedule tracks to go live later, cancel peak jobs, and watch peak-generation progress. IP-allowlisted.
 - **Scheduler** — a cron promotes scheduled tracks to published every 30 seconds.
 - **No database** — state is plain JSON files on disk (`published.json`, `scheduled.json`); the music library is a read-only bind mount.
 
@@ -18,7 +19,7 @@ The whole app is served under a configurable URL subpath (default **`/music`**),
 - **Monorepo:** pnpm workspaces (`apps/api`, `apps/web`, `packages/shared`)
 - **Backend:** NestJS 11 (TypeScript) — internal port `3001`
 - **Frontend:** Next.js 15 + React 19 + Tailwind 4 — internal port `3000`
-- **Audio tooling:** `ffmpeg` (peak generation), `wavesurfer.js` (rendering)
+- **Audio tooling:** `ffmpeg` (peak generation only — playback is YouTube's), `wavesurfer.js` (waveform rendering), YouTube IFrame Player API (playback)
 - **Reverse proxy:** Caddy (in-compose), behind an optional host nginx for TLS
 
 ## Running with Docker
@@ -32,25 +33,26 @@ docker compose up --build -d
 | Service     | Internal port | Host binding       | Role                                     |
 |-------------|---------------|--------------------|------------------------------------------|
 | `data-init` | —             | —                  | One-shot: chowns + tightens the data volume (700/600), exits |
-| `api`       | 3001          | — (network only)   | NestJS — REST API + audio streaming      |
+| `api`       | 3001          | — (network only)   | NestJS — REST API + audio downloads      |
 | `web`       | 3000          | — (network only)   | Next.js — public site + admin UI         |
 | `caddy`     | 8080          | `127.0.0.1:8087`   | Reverse proxy (single port)              |
 
-Caddy routes by path: `/music/api/*`, `/music/audio/*` and `/music/stream/*` → `api`, everything else under `/music` → `web`. Swagger (`/music/api/docs`) is blocked at the edge.
+Caddy routes by path: `/music/api/*` and `/music/audio/*` → `api`, everything else under `/music` → `web`. Swagger (`/music/api/docs`) is blocked at the edge.
 
 ### Optional host reverse proxy (TLS)
 
 For a public HTTPS domain, put a host-level reverse proxy (nginx in the example
 below) in front to terminate TLS and forward to Caddy on `127.0.0.1:8087`.
 
-**Five location blocks are needed:** two for audio streaming, two to restrict
+**Four location blocks are needed:** one for audio downloads, two to restrict
 the admin surface, and one catch-all. Order in the file does not matter — for
 prefix locations nginx picks the *longest* match, so every specific block below
 wins over the catch-all `/music`.
 
-Long-form audio is the whole reason this config is not the default one: a
-2-hour track is a single multi-hundred-megabyte response served over Range
-requests, so buffering must be off and the timeouts must be hours, not seconds.
+Long-form audio downloads are the whole reason this config is not the default
+one: a 2-hour track is a single multi-hundred-megabyte response served over
+Range requests, so buffering must be off and the timeouts must be hours, not
+seconds. Playback itself is YouTube's problem, not this proxy's.
 
 Two prerequisites go at `http{}` level, outside any `server{}` block:
 
@@ -79,27 +81,9 @@ Then, inside the TLS `server{}` block:
 
 ```nginx
 # ── Original audio files — public, Range requests, up to ~1 GB ──
+# This is the DOWNLOAD button's path only — playback is YouTube-backed and
+# never touches this proxy at all.
 location /music/audio/ {
-    proxy_pass              http://caddy_public;
-    proxy_buffering         off;
-    proxy_request_buffering off;
-    proxy_read_timeout      1h;
-    proxy_send_timeout      1h;
-    proxy_http_version      1.1;
-    proxy_set_header        Host              $host;
-    proxy_set_header        X-Real-IP         $remote_addr;
-    proxy_set_header        X-Forwarded-For   $proxy_add_x_forwarded_for;
-    proxy_set_header        X-Forwarded-Proto $scheme;
-    proxy_set_header        X-Forwarded-Host  $host;
-    proxy_set_header        X-Internal-Listener "";
-    proxy_set_header        Connection        "";
-}
-
-# ── Compressed AAC playback proxies — same streaming rules as /audio ──
-# Easy to miss: this is what the player requests FIRST for every track, and it
-# only falls back to /music/audio/ when the .m4a is absent. Leave this block
-# out and every seek on a proxied track goes through the buffered catch-all.
-location /music/stream/ {
     proxy_pass              http://caddy_public;
     proxy_buffering         off;
     proxy_request_buffering off;
@@ -204,7 +188,7 @@ answered with a 404 by Caddy, so it needs nothing here.
 **Do not block these** — the public site stops working without them:
 `/music/api/tracks`, `/music/api/tracks/:file/peaks`, `/music/api/tracks/stream`,
 `/music/api/categories` (read-only; the writes live under `/music/api/admin/`),
-`/music/audio/`, `/music/stream/`.
+`/music/audio/`.
 
 This is defence in depth, not the only gate. `IpWhitelistGuard` already checks
 `ADMIN_IPS` at the application layer, and it fails closed in production if the
@@ -267,7 +251,7 @@ BASE_PATH=/music     # leading slash, no trailing slash; empty = served at the d
 docker compose build web && docker compose up -d
 ```
 
-The host reverse proxy hardcodes the `/music` paths — update all three `location` blocks above (`/music/audio/`, `/music/stream/`, `/music`) if you change `BASE_PATH`.
+The host reverse proxy hardcodes the `/music` paths — update both `location` blocks above (`/music/audio/`, `/music`) if you change `BASE_PATH`.
 
 ## URLs / routes
 
@@ -278,8 +262,7 @@ The host reverse proxy hardcodes the `/music` paths — update all three `locati
 | `/music/api/tracks` | Public — list of published tracks |
 | `/music/api/categories` | Public — category names for the list tabs (read-only) |
 | `/music/api/tracks/:file/peaks` | Public — waveform peaks (`202` while generating) |
-| `/music/audio/:file` | Public — original file, streaming / download |
-| `/music/stream/:file.m4a` | Public — compressed AAC playback proxy (absent when the source is already small enough to serve directly) |
+| `/music/audio/:file` | Public — original file, download only (playback is YouTube-backed) |
 | `/music/api/tracks/stream` | Public — SSE, live track/category changes |
 | `/music/api/admin/peaks-progress` | Admin — SSE, media processing progress |
 | `/music/api/admin/*` | Admin API (18 routes) — IP-allowlisted + session + CSRF |
@@ -447,7 +430,7 @@ Admin access is gated at the application layer, so it holds no matter how a requ
 - **Session** — `POST /music/api/admin/login` (bcrypt) sets a `httpOnly`, `signed`, `sameSite=strict` cookie scoped to `/music/api/admin`; the `Secure` flag is derived from `req.secure`. The cookie carries a **random server-side session id**, not a constant — `logout` revokes it immediately, and a container restart drops all sessions.
 - **CSRF** — a token in the `csrf-token` header is required for unsafe admin methods.
 - **Input validation** — every admin request body is validated against a DTO by a global `ValidationPipe` (`whitelist` + `forbidNonWhitelisted`), so unexpected properties are rejected rather than persisted to the JSON stores.
-- **Embargo** — `/music/audio/<file>`, `/music/stream/<file>.m4a` and `/music/api/tracks/:file/peaks` serve **published tracks only**. An unpublished, scheduled-but-unreleased, or unknown filename returns `404`, so a scheduled release can't be fetched early by guessing names.
+- **Embargo** — `/music/audio/<file>` and `/music/api/tracks/:file/peaks` serve **published tracks only**. An unpublished, scheduled-but-unreleased, or unknown filename returns `404`, so a scheduled release can't be fetched early by guessing names. (Playback itself is YouTube-backed and carries no embargo of its own — the YouTube link only becomes reachable from the public site once the track is published, same as everything else here.)
 - **Rate limiting** — 100 req/min globally; the login endpoint is capped at 5 attempts per 5 minutes with a deterministic `Retry-After`. Host nginx adds a 10 r/min perimeter cap on the login route.
 - **CSP** — strict, via Helmet plus a per-request nonce in Next.js middleware (covers the homepage and every route).
 - **Boot check** — the API refuses to start in production if `COOKIE_SECRET` is unset, rather than falling back to a random per-boot secret.
@@ -460,7 +443,7 @@ Every container ships the same locked-down posture — treat this as the baselin
 - **Non-root, single identity.** `api` and `web` run as uid/gid `1000` (the base image's `node` user); nothing long-running runs as root. `data-init` is the only container that touches root, and only to `chown`/`chmod` the volume before it exits.
 - **Read-only root filesystem.** `read_only: true` on every long-running container. The only writable paths are an explicit `tmpfs /tmp` (scratch, never persisted) and the `echorift-data` volume mounted at `/app/data` on the api.
 - **Code the app can't modify.** Application code (`dist`, `node_modules`, the Next standalone bundle) is copied `root:root` and only world-readable, so the runtime user can execute it but never rewrite it — a second barrier behind the read-only rootfs.
-- $\color{red}{\textbf{Owner-only data.}}$ The data volume is `700` on directories and `600` on files, owned by `1000`; the API sets `umask 077` so everything it writes at runtime (peaks JSON, `.m4a` streams, the JSON stores and their temp files) is created `600`. No other uid can read it.
+- $\color{red}{\textbf{Owner-only data.}}$ The data volume is `700` on directories and `600` on files, owned by `1000`; the API sets `umask 077` so everything it writes at runtime (peaks JSON, the JSON stores and their temp files) is created `600`. No other uid can read it.
 - **Read-only music.** The music library is a `:ro` bind mount — the app can never write to your source files.
 - **No capabilities, no privilege escalation.** `cap_drop: ALL` and `security_opt: no-new-privileges:true` on every container. Caddy re-adds exactly one capability, `NET_BIND_SERVICE`, and nothing else.
 - **Bounded resources.** Every container has explicit CPU and memory limits, so a runaway — or an attacker trying to exhaust the box — can't starve the host or its neighbours:
@@ -481,6 +464,25 @@ docker exec echorift-api sh -c 'ls -land /app/dist /app/data'  # dist → root:r
 docker exec echorift-api sh -c 'touch /app/dist/x'             # → Read-only file system
 docker stats --no-stream                                       # live CPU/mem against the limits above
 ```
+
+### Host-level project permissions
+
+Container hardening above covers everything that runs *inside* Docker. The
+project checkout itself — source, `docker-compose.yml`, the `Caddyfile`, and
+especially `.env` (holds `ADMIN_PASSWORD_HASH` and `COOKIE_SECRET`) — sits on
+the host filesystem and needs the same least-privilege treatment `data-init`
+already gives the data volume.
+
+```bash
+sudo ./scripts/harden-permissions.sh
+```
+
+Owns the whole checkout `root:root`, `700` on directories, `600` on files.
+This is safe because `docker compose build`/`up` always runs as root and
+ignores file mode bits, and nothing shipped in this repo is executed off its
+own execute bit (the one shebang script, `apps/web/scripts/check-motion-tokens.mjs`,
+runs via `node`, never directly). If you deploy as a non-root user instead,
+chown to that user/group in the script rather than `root:root`.
 
 ## Local development
 

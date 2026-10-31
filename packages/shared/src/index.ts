@@ -18,12 +18,24 @@ export type PublishedTrack = {
    * Normalised on every read by migratePublished.
    */
   position: number;
+  /**
+   * The YouTube video that actually plays for this track. Playback is
+   * YouTube-backed, not streamed off disk — this is the one thing that makes
+   * a track playable. `null` only for data migrated from before this field
+   * existed; a track in that state is published (and downloadable) but
+   * publicly shows as unplayable until the admin backfills a link via the
+   * published-list edit action. Publishing/scheduling a NEW track always
+   * requires a valid one — see isValidYoutubeUrl.
+   */
+  youtubeUrl: string | null;
 };
 
 export type ScheduledTrack = {
   file: string;
   time: string;
   category?: CategoryId | null;
+  /** Same requirement as PublishedTrack.youtubeUrl, carried across on release. */
+  youtubeUrl?: string | null;
 };
 
 export const TrackSchema = z.string().min(1).max(255);
@@ -44,6 +56,53 @@ export function isValidFilename(filename: string): boolean {
     !filename.includes('\0') &&
     /\.(mp3|wav|flac)$/i.test(filename)
   );
+}
+
+// YouTube's video ids are always exactly 11 characters from this alphabet —
+// true for every current URL shape (watch, youtu.be, shorts, embed). Anchored
+// full-match: a prefix match would accept "ID_PLUS_GARBAGE" and quietly embed
+// the wrong video.
+const YOUTUBE_ID_RE = /^[A-Za-z0-9_-]{11}$/;
+
+/**
+ * Pull the 11-character video id out of whatever shape of YouTube URL an
+ * admin pastes, or null if none can be found. Deliberately permissive on
+ * input (scheme optional, `www.`/`m.`/`music.` optional, any extra query
+ * params or a `#t=` fragment ignored) because the only thing that matters is
+ * whether a real video id comes out the other end — which is then validated
+ * strictly against YOUTUBE_ID_RE regardless of how it was found.
+ *
+ * Callers must always re-derive the id from the stored URL via this function
+ * when building an embed — never interpolate the raw stored string into an
+ * iframe src or any other DOM sink.
+ */
+export function extractYoutubeVideoId(url: unknown): string | null {
+  if (typeof url !== 'string' || url.trim() === '') return null;
+
+  let candidate: string | null = null;
+
+  // youtu.be/<id>
+  const short = /youtu\.be\/([^?&/#]+)/.exec(url);
+  if (short) candidate = short[1];
+
+  // youtube.com/watch?v=<id> (v can be anywhere in the query string)
+  if (!candidate) {
+    const watch = /[?&]v=([^?&#]+)/.exec(url);
+    if (watch) candidate = watch[1];
+  }
+
+  // youtube.com/shorts/<id> or youtube.com/embed/<id>
+  if (!candidate) {
+    const path = /youtube(?:-nocookie)?\.com\/(?:shorts|embed|live)\/([^?&/#]+)/.exec(url);
+    if (path) candidate = path[1];
+  }
+
+  if (!candidate) return null;
+  return YOUTUBE_ID_RE.test(candidate) ? candidate : null;
+}
+
+export function isValidYoutubeUrl(url: unknown): boolean {
+  return extractYoutubeVideoId(url) !== null;
 }
 
 export const CATEGORY_NAME_MAX = 64;
@@ -191,20 +250,30 @@ export function parseRowRange(input: string): RowRangeResult {
  */
 export function migratePublished(raw: unknown): PublishedTrack[] {
   if (!Array.isArray(raw)) return [];
-  type Partial = { file: string; category: CategoryId | null; position?: number };
+  type Partial = {
+    file: string;
+    category: CategoryId | null;
+    youtubeUrl: string | null;
+    position?: number;
+  };
   const parsed: Partial[] = [];
   for (const entry of raw) {
     if (typeof entry === 'string') {
-      parsed.push({ file: entry, category: null });
+      parsed.push({ file: entry, category: null, youtubeUrl: null });
     } else if (
       entry &&
       typeof entry === 'object' &&
       typeof (entry as PublishedTrack).file === 'string'
     ) {
-      const { file, category, position } = entry as PublishedTrack;
+      const { file, category, position, youtubeUrl } = entry as PublishedTrack;
       parsed.push({
         file,
         category: typeof category === 'string' ? category : null,
+        // Predates the YouTube field entirely, or was written with a corrupt
+        // value — either way default to null rather than dropping the whole
+        // entry. A null youtubeUrl just means the track shows as unplayable
+        // (publicly) until the admin backfills it from the published list.
+        youtubeUrl: typeof youtubeUrl === 'string' ? youtubeUrl : null,
         position: Number.isFinite(position) ? position : undefined,
       });
     }
@@ -218,11 +287,17 @@ export function migratePublished(raw: unknown): PublishedTrack[] {
   return [...positioned, ...unpositioned].map((t, i) => ({
     file: t.file,
     category: t.category,
+    youtubeUrl: t.youtubeUrl,
     position: i,
   }));
 }
 
-/** scheduled.json entries predating categories have no `category` field. */
+/**
+ * scheduled.json entries predating categories have no `category` field;
+ * entries predating the YouTube requirement have no `youtubeUrl` field.
+ * Both default to null rather than dropping the entry — a scheduled track
+ * missing its link still releases on time, it just can't play until fixed.
+ */
 export function migrateScheduled(raw: unknown): ScheduledTrack[] {
   if (!Array.isArray(raw)) return [];
   const out: ScheduledTrack[] = [];
@@ -233,8 +308,13 @@ export function migrateScheduled(raw: unknown): ScheduledTrack[] {
       typeof (entry as ScheduledTrack).file === 'string' &&
       typeof (entry as ScheduledTrack).time === 'string'
     ) {
-      const { file, time, category } = entry as ScheduledTrack;
-      out.push({ file, time, category: typeof category === 'string' ? category : null });
+      const { file, time, category, youtubeUrl } = entry as ScheduledTrack;
+      out.push({
+        file,
+        time,
+        category: typeof category === 'string' ? category : null,
+        youtubeUrl: typeof youtubeUrl === 'string' ? youtubeUrl : null,
+      });
     }
   }
   return out;

@@ -3,6 +3,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { AnimatePresence } from 'framer-motion';
 import type { Category } from '@echorift/shared';
+import { isValidYoutubeUrl } from '@echorift/shared';
 import * as api from '../lib/api';
 import { useMultiSelect } from '../hooks/useMultiSelect';
 import { SearchBox } from './SearchBox';
@@ -26,6 +27,10 @@ export function AdminPublishForm({ files, categories, csrfToken, onSuccess }: Pr
   const [successMsg, setSuccessMsg] = useState('');
   const [scheduleFiles, setScheduleFiles] = useState<string[] | null>(null);
   const [category, setCategory] = useState<string | null>(null);
+  // Draft YouTube links, keyed by filename. Unlike category (legitimately
+  // shared across a whole batch) the link is 1:1 per file, so every row gets
+  // its own input rather than one shared control for the form.
+  const [youtubeUrls, setYoutubeUrls] = useState<Record<string, string>>({});
   const successTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // A category is mandatory. When there's exactly one, preselect it so the
@@ -58,6 +63,11 @@ export function AdminPublishForm({ files, categories, csrfToken, onSuccess }: Pr
     successTimer.current = setTimeout(() => setSuccessMsg(''), 2000);
   };
 
+  // Every selected file needs a link before PUBLISH NOW can fire — same spirit
+  // as the server's own requirement, checked here too so the button disables
+  // itself instead of round-tripping to find out.
+  const selectedLinksValid = sel.selected.every((f) => isValidYoutubeUrl(youtubeUrls[f]));
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!csrfToken) { setError('Session expired. Please reload.'); return; }
@@ -71,11 +81,20 @@ export function AdminPublishForm({ files, categories, csrfToken, onSuccess }: Pr
       setError('Select a category.');
       return;
     }
+    if (!selectedLinksValid) {
+      setError('Every selected track needs a valid YouTube link.');
+      return;
+    }
 
     setSubmitting(true);
     setError('');
     try {
-      await api.publish(toPublish, [], csrfToken, category);
+      await api.publish(
+        toPublish.map((file) => ({ file, youtubeUrl: youtubeUrls[file] })),
+        [],
+        csrfToken,
+        category,
+      );
       sel.clear();
       await onSuccess();
       showSuccess(`> PUBLISHED ${toPublish.length} TRACK${toPublish.length !== 1 ? 'S' : ''}`);
@@ -88,7 +107,7 @@ export function AdminPublishForm({ files, categories, csrfToken, onSuccess }: Pr
   };
 
   const handleScheduleConfirm = async (
-    entries: { file: string; time: string }[],
+    entries: { file: string; time: string; youtubeUrl: string }[],
     scheduleCategory: string | null,
   ) => {
     await api.publish(
@@ -135,47 +154,72 @@ export function AdminPublishForm({ files, categories, csrfToken, onSuccess }: Pr
               &gt; NO UNPUBLISHED TRACKS
             </div>
           )}
-          {filtered.map((file, i) => (
-            <div
-              key={file}
-              role="listitem"
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                flexWrap: 'wrap',
-                gap: '0.5rem',
-                padding: '0.4rem 0.6rem',
-                borderBottom: '1px solid #1a1f12',
-                fontFamily: "var(--font-jetbrains-mono), monospace",
-                fontSize: '11px',
-                color: '#ffb000',
-              }}
-            >
-              <span style={{ color: '#8a5f00', minWidth: '2rem', flexShrink: 0 }}>
-                {String(i + 1).padStart(3, '0')}
-              </span>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '0.3rem', flex: 1, minWidth: 0 }}>
-                <CrtCheckbox
-                  checked={sel.has(file)}
-                  onChange={(v, mods) => sel.toggle(file, v, mods.shift)}
-                  ariaLabel={`Publish ${file}`}
-                  variant="amber"
-                />
-                <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                  {file}
-                </span>
-              </div>
-              <button
-                type="button"
-                className="crt-btn small"
-                onClick={() => setScheduleFiles([file])}
-                aria-label={`Schedule ${file}`}
-                style={{ flexShrink: 0 }}
+          {filtered.map((file, i) => {
+            const url = youtubeUrls[file] ?? '';
+            const checked = sel.has(file);
+            const showInvalid = checked && !isValidYoutubeUrl(url);
+            return (
+              <div
+                key={file}
+                role="listitem"
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  flexWrap: 'wrap',
+                  gap: '0.5rem',
+                  padding: '0.4rem 0.6rem',
+                  borderBottom: '1px solid #1a1f12',
+                  fontFamily: "var(--font-jetbrains-mono), monospace",
+                  fontSize: '11px',
+                  color: '#ffb000',
+                }}
               >
-                [ SCHEDULE ]
-              </button>
-            </div>
-          ))}
+                <span style={{ color: '#8a5f00', minWidth: '2rem', flexShrink: 0 }}>
+                  {String(i + 1).padStart(3, '0')}
+                </span>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.3rem', flex: 1, minWidth: 0 }}>
+                  <CrtCheckbox
+                    checked={checked}
+                    onChange={(v, mods) => sel.toggle(file, v, mods.shift)}
+                    ariaLabel={`Publish ${file}`}
+                    variant="amber"
+                  />
+                  <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {file}
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  className="crt-btn small"
+                  onClick={() => setScheduleFiles([file])}
+                  aria-label={`Schedule ${file}`}
+                  style={{ flexShrink: 0 }}
+                >
+                  [ SCHEDULE ]
+                </button>
+                {/* 1:1 with the file, unlike category — every row gets its own
+                    link. Full-width on its own line (flex-basis 100%) so the
+                    row above stays readable regardless of input width. */}
+                <input
+                  type="url"
+                  className="crt-input"
+                  placeholder="https://youtube.com/watch?v=…"
+                  value={url}
+                  onChange={(e) =>
+                    setYoutubeUrls((prev) => ({ ...prev, [file]: e.target.value }))
+                  }
+                  aria-label={`YouTube link for ${file}`}
+                  aria-invalid={showInvalid}
+                  style={{
+                    flex: '1 1 100%',
+                    padding: '0.25rem 0.4rem',
+                    fontSize: 'max(11px, 16px)',
+                    borderColor: showInvalid ? '#ff3b3b' : undefined,
+                  }}
+                />
+              </div>
+            );
+          })}
         </div>
 
         {successMsg && (
@@ -199,7 +243,11 @@ export function AdminPublishForm({ files, categories, csrfToken, onSuccess }: Pr
             gap: '0.5rem',
           }}
         >
-          <button type="submit" className="crt-btn" disabled={submitting || !csrfToken || !category}>
+          <button
+            type="submit"
+            className="crt-btn"
+            disabled={submitting || !csrfToken || !category || sel.count === 0 || !selectedLinksValid}
+          >
             {submitting ? (
               <>
                 PUBLISHING<Caret speed={0.6} />
@@ -243,6 +291,7 @@ export function AdminPublishForm({ files, categories, csrfToken, onSuccess }: Pr
             files={scheduleFiles}
             categories={categories}
             defaultCategory={category}
+            initialYoutubeUrls={youtubeUrls}
             csrfToken={csrfToken}
             onClose={() => setScheduleFiles(null)}
             onConfirm={handleScheduleConfirm}

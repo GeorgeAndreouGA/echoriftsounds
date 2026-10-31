@@ -606,6 +606,27 @@ body,
   .crt-player-waveform {
     padding: 0.5rem 0.75rem 0;
   }
+  /* The YouTube embed — audio source only, no visible video. Kept at a real
+     (non-zero) size and positioned off-screen rather than `display:none` or
+     `visibility:hidden`: some browsers throttle/pause media in embeds that
+     have zero size or are display:none, but leave an off-screen iframe with
+     real dimensions running normally. The IFrame API replaces the inner div
+     with its own <iframe>, sized to fill it via the child rule below. */
+  .crt-player-video {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    left: -9999px;
+    top: -9999px;
+  }
+  .crt-player-video > div,
+  .crt-player-video iframe {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+  }
   /* Set imperatively on frameRef during a drag — a render-free state flag, which
      is what that ref was waiting for (it was assigned and never read). */
   .crt-player-frame {

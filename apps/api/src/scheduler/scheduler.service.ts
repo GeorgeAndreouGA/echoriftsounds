@@ -2,7 +2,6 @@ import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import { StorageService } from '../storage/storage.service';
 import { PeaksProgressService } from '../tracks/peaks-progress.service';
-import { TranscodeService } from '../tracks/transcode.service';
 
 @Injectable()
 export class SchedulerService implements OnModuleInit {
@@ -11,7 +10,6 @@ export class SchedulerService implements OnModuleInit {
   constructor(
     private readonly storage: StorageService,
     private readonly peaksProgress: PeaksProgressService,
-    private readonly transcode: TranscodeService,
   ) {}
 
   onModuleInit() {
@@ -26,10 +24,12 @@ export class SchedulerService implements OnModuleInit {
     const due = scheduled.filter((item) => new Date(item.time) <= now);
     if (due.length === 0) return;
 
-    // The category is chosen when the track is scheduled, so carry it across
-    // to the published entry on release. Captured here rather than re-read in
-    // onReady, which runs after the scheduled entry has already been removed.
+    // The category and YouTube link are chosen when the track is scheduled, so
+    // carry them across to the published entry on release. Captured here
+    // rather than re-read in onReady, which runs after the scheduled entry has
+    // already been removed.
     const categoryByFile = new Map(due.map((item) => [item.file, item.category ?? null]));
+    const youtubeUrlByFile = new Map(due.map((item) => [item.file, item.youtubeUrl ?? null]));
 
     // Don't move the file out of scheduled.json yet — peaks must be on disk
     // first. publishWhenReady generates the JSON, then onReady atomically
@@ -40,9 +40,6 @@ export class SchedulerService implements OnModuleInit {
     this.peaksProgress.publishWhenReady(
       due.map((item) => item.file),
       async (file) => {
-        // Generate the playback stream before the track goes public (same gate
-        // as instant publishes), then move it from scheduled to published.
-        await this.transcode.ensure(file);
         await this.storage.scheduled.update((current) =>
           current.filter((item) => item.file !== file),
         );
@@ -54,6 +51,7 @@ export class SchedulerService implements OnModuleInit {
                 {
                   file,
                   category: categoryByFile.get(file) ?? null,
+                  youtubeUrl: youtubeUrlByFile.get(file) ?? null,
                   position: current.length,
                 },
               ],

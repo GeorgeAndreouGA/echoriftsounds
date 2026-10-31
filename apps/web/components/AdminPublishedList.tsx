@@ -4,6 +4,7 @@ import { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence, Reorder, useDragControls } from 'framer-motion';
 import { DUR, EASE, s } from './motion/tokens';
 import type { Category, PublishedTrack } from '@echorift/shared';
+import { isValidYoutubeUrl } from '@echorift/shared';
 import * as api from '../lib/api';
 import { useMultiSelect } from '../hooks/useMultiSelect';
 import { SearchBox } from './SearchBox';
@@ -42,7 +43,119 @@ interface RowProps {
   draggable: boolean;
   onToggle: (file: string, checked: boolean, shift: boolean) => void;
   onReassign: (file: string, category: string) => void;
+  onSetYoutubeUrl: (file: string, url: string) => Promise<void>;
   onCommit: () => void;
+}
+
+/**
+ * Edit control for a published track's YouTube link — click-to-edit with an
+ * explicit [ SET ] commit, same "higher-stakes field gets an explicit
+ * confirm" philosophy as bulk category move / unpublish below, rather than
+ * the commit-on-change style the per-row category <select> uses. A mistyped
+ * category is a one-click fix; a mistyped link silently breaks playback.
+ */
+function YoutubeLinkCell({
+  file,
+  url,
+  onSet,
+}: {
+  file: string;
+  url: string | null;
+  onSet: (file: string, url: string) => Promise<void>;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(url ?? '');
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState('');
+
+  // Picks up a server-side change (e.g. another admin tab) while not mid-edit.
+  useEffect(() => {
+    if (!editing) setDraft(url ?? '');
+  }, [url, editing]);
+
+  const cancel = () => {
+    setEditing(false);
+    setDraft(url ?? '');
+    setErr('');
+  };
+
+  const commit = async () => {
+    if (!isValidYoutubeUrl(draft)) {
+      setErr('Invalid link');
+      return;
+    }
+    setSaving(true);
+    setErr('');
+    try {
+      await onSet(file, draft);
+      setEditing(false);
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (!editing) {
+    return (
+      <button
+        type="button"
+        className="crt-btn small"
+        onClick={() => setEditing(true)}
+        aria-label={`Edit YouTube link for ${file}`}
+        style={{
+          flexShrink: 0,
+          color: url ? '#8a5f00' : '#ff3b3b',
+          borderColor: url ? undefined : '#ff3b3b',
+        }}
+      >
+        {url ? '[ LINK ]' : '[ ⚠ NO LINK ]'}
+      </button>
+    );
+  }
+
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: '0.3rem', flex: '1 1 100%' }}>
+      <input
+        type="url"
+        className="crt-input"
+        autoFocus
+        value={draft}
+        disabled={saving}
+        onChange={(e) => setDraft(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') { e.preventDefault(); void commit(); }
+          if (e.key === 'Escape') cancel();
+        }}
+        aria-label={`YouTube link for ${file}`}
+        aria-invalid={!!err}
+        style={{
+          flex: '1 1 auto',
+          minWidth: 0,
+          padding: '0.2rem 0.4rem',
+          fontSize: 'max(11px, 16px)',
+          borderColor: err ? '#ff3b3b' : undefined,
+        }}
+      />
+      <button type="button" className="crt-btn small" onClick={commit} disabled={saving} style={{ flexShrink: 0 }}>
+        {saving ? 'SAVING…' : '[ SET ]'}
+      </button>
+      <button
+        type="button"
+        className="crt-btn small danger"
+        onClick={cancel}
+        disabled={saving}
+        style={{ flexShrink: 0 }}
+      >
+        [ CANCEL ]
+      </button>
+      {err && (
+        <span className="crt-error" role="alert" style={{ flexBasis: '100%' }}>
+          &gt; {err}
+        </span>
+      )}
+    </div>
+  );
 }
 
 /** Row body — identical whether or not the row is drag-enabled. */
@@ -54,6 +167,7 @@ function RowContent({
   draggable,
   onToggle,
   onReassign,
+  onSetYoutubeUrl,
   onDragHandlePointerDown,
 }: Omit<RowProps, 'removing' | 'onCommit'> & {
   onDragHandlePointerDown?: (e: React.PointerEvent) => void;
@@ -105,6 +219,7 @@ function RowContent({
           NEEDS CATEGORY
         </span>
       )}
+      <YoutubeLinkCell file={track.file} url={track.youtubeUrl} onSet={onSetYoutubeUrl} />
       <CategorySelect
         categories={categories}
         value={track.category}
@@ -196,6 +311,15 @@ export function AdminPublishedList({ items, categories, csrfToken, onSuccess }: 
     } catch (err) {
       setError((err as Error).message);
     }
+  };
+
+  // Throws rather than setting the page-level `error` — YoutubeLinkCell
+  // catches it and shows the message inline, right next to the input that
+  // caused it, rather than at the bottom of a possibly-long list.
+  const handleSetYoutubeUrl = async (file: string, youtubeUrl: string) => {
+    if (!csrfToken) throw new Error('Session expired.');
+    await api.updateYoutubeUrl([file], youtubeUrl, csrfToken);
+    onSuccess();
   };
 
   const toggle = (file: string, checked: boolean, shift: boolean) =>
@@ -315,6 +439,7 @@ export function AdminPublishedList({ items, categories, csrfToken, onSuccess }: 
                   draggable={false}
                   onToggle={toggle}
                   onReassign={handleReassign}
+                  onSetYoutubeUrl={handleSetYoutubeUrl}
                 />
               </motion.div>
             ))}
@@ -340,6 +465,7 @@ export function AdminPublishedList({ items, categories, csrfToken, onSuccess }: 
               draggable
               onToggle={toggle}
               onReassign={handleReassign}
+              onSetYoutubeUrl={handleSetYoutubeUrl}
               onCommit={commitOrder}
             />
           ))}

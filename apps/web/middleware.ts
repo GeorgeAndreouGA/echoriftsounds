@@ -6,8 +6,12 @@ export function middleware(request: NextRequest) {
   const csp = [
     `default-src 'self'`,
     // 'strict-dynamic' lets Next's nonce'd bootstrap script load chunks without
-    // each chunk needing 'self'. Older browsers fall back to 'self' + nonce.
-    `script-src 'self' 'nonce-${nonce}' 'strict-dynamic'`,
+    // each chunk needing 'self'. It also covers the YouTube IFrame API script
+    // (lib/youtube.ts inserts it dynamically) in browsers that honor
+    // strict-dynamic; 'https://www.youtube.com' is the fallback host-source for
+    // the rest — host-sources are simply ignored where strict-dynamic applies,
+    // so this is additive, not a downgrade. Older browsers fall back to 'self' + nonce.
+    `script-src 'self' 'nonce-${nonce}' 'strict-dynamic' https://www.youtube.com`,
     // Tailwind + framer-motion emit inline styles; we accept that trade-off.
     `style-src 'self' 'unsafe-inline' https://fonts.googleapis.com`,
     `font-src 'self' https://fonts.gstatic.com`,
@@ -18,6 +22,11 @@ export function middleware(request: NextRequest) {
     `connect-src 'self'`,
     // wavesurfer.js can spawn blob: workers for decoding.
     `worker-src 'self' blob:`,
+    // The YouTube player embed — playback is YouTube-backed, not streamed off
+    // disk. youtube-nocookie.com is what the embed is actually built against
+    // (see lib/youtube.ts); the IFrame API also redirects through youtube.com
+    // internally for some players.
+    `frame-src https://www.youtube.com https://www.youtube-nocookie.com`,
     `frame-ancestors 'none'`,
     `base-uri 'self'`,
     `form-action 'self'`,

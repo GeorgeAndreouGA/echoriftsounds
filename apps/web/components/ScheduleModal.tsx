@@ -5,6 +5,7 @@ import { createPortal } from 'react-dom';
 import { motion } from 'framer-motion';
 import { DUR, EASE, s } from './motion/tokens';
 import type { Category } from '@echorift/shared';
+import { isValidYoutubeUrl } from '@echorift/shared';
 import { CrtScheduler } from './CrtScheduler';
 import { CategorySelect } from './CategorySelect';
 import { Countdown } from './Countdown';
@@ -15,10 +16,13 @@ interface Props {
   files: string[];
   categories: Category[];
   defaultCategory: string | null;
+  /** Seeds the per-file link inputs below from drafts already typed into the
+   * publish form, so scheduling a file doesn't mean retyping its link. */
+  initialYoutubeUrls?: Record<string, string>;
   csrfToken: string;
   onClose: () => void;
   onConfirm: (
-    scheduled: { file: string; time: string }[],
+    scheduled: { file: string; time: string; youtubeUrl: string }[],
     category: string | null,
   ) => Promise<void>;
 }
@@ -36,6 +40,7 @@ export function ScheduleModal({
   files,
   categories,
   defaultCategory,
+  initialYoutubeUrls,
   csrfToken,
   onClose,
   onConfirm,
@@ -43,11 +48,17 @@ export function ScheduleModal({
   const [datetime, setDatetime] = useState(() => new Date(Date.now() + 3_600_000).toISOString());
   const [staggerMin, setStaggerMin] = useState(0);
   const [category, setCategory] = useState<string | null>(defaultCategory);
+  const [youtubeUrls, setYoutubeUrls] = useState<Record<string, string>>(() => {
+    const seeded: Record<string, string> = {};
+    for (const f of files) seeded[f] = initialYoutubeUrls?.[f] ?? '';
+    return seeded;
+  });
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
   const [mounted, setMounted] = useState(false);
 
   const bulk = files.length > 1;
+  const linksValid = files.every((f) => isValidYoutubeUrl(youtubeUrls[f]));
 
   // Plain UTC arithmetic, so "+24H" is exactly 24 hours rather than "the same
   // wall-clock time tomorrow" — across a DST boundary those differ by an hour.
@@ -57,8 +68,9 @@ export function ScheduleModal({
       files.map((file, i) => ({
         file,
         time: new Date(new Date(datetime).getTime() + i * staggerMin * 60_000).toISOString(),
+        youtubeUrl: youtubeUrls[file] ?? '',
       })),
-    [files, datetime, staggerMin],
+    [files, datetime, staggerMin, youtubeUrls],
   );
 
   useEffect(() => setMounted(true), []);
@@ -90,6 +102,10 @@ export function ScheduleModal({
     }
     if (!category) {
       setError('Select a category.');
+      return;
+    }
+    if (!linksValid) {
+      setError('Every track needs a valid YouTube link.');
       return;
     }
     setSubmitting(true);
@@ -182,6 +198,68 @@ export function ScheduleModal({
           </div>
 
           <CrtScheduler value={datetime} onChange={setDatetime} />
+
+          {/* 1:1 per file, unlike category/time — shown for a single file too,
+              not just a bulk batch. Seeded from initialYoutubeUrls when the
+              publish form already had a draft typed in. */}
+          <div className="crt-file-list" role="list" aria-label="YouTube links">
+            {files.map((file, i) => {
+              const url = youtubeUrls[file] ?? '';
+              const invalid = !isValidYoutubeUrl(url);
+              return (
+                <div
+                  key={file}
+                  role="listitem"
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    flexWrap: 'wrap',
+                    gap: '0.5rem',
+                    padding: '0.35rem 0.6rem',
+                    borderBottom: '1px solid #1a1f12',
+                    fontFamily: "var(--font-jetbrains-mono), monospace",
+                    fontSize: '11px',
+                    color: '#ffb000',
+                  }}
+                >
+                  <span style={{ color: '#8a5f00', minWidth: '2rem', flexShrink: 0 }}>
+                    {String(i + 1).padStart(3, '0')}
+                  </span>
+                  <span
+                    style={{
+                      flex: '0 1 auto',
+                      minWidth: 0,
+                      maxWidth: '40%',
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                    }}
+                  >
+                    {file}
+                  </span>
+                  <input
+                    type="url"
+                    className="crt-input"
+                    placeholder="https://youtube.com/watch?v=…"
+                    value={url}
+                    disabled={submitting}
+                    onChange={(e) =>
+                      setYoutubeUrls((prev) => ({ ...prev, [file]: e.target.value }))
+                    }
+                    aria-label={`YouTube link for ${file}`}
+                    aria-invalid={invalid}
+                    style={{
+                      flex: '1 1 10rem',
+                      minWidth: 0,
+                      padding: '0.25rem 0.4rem',
+                      fontSize: 'max(11px, 16px)',
+                      borderColor: invalid ? '#ff3b3b' : undefined,
+                    }}
+                  />
+                </div>
+              );
+            })}
+          </div>
 
           {bulk && (
             <>
@@ -279,7 +357,7 @@ export function ScheduleModal({
               type="button"
               className="crt-btn small"
               onClick={handleConfirm}
-              disabled={submitting || !csrfToken || !category}
+              disabled={submitting || !csrfToken || !category || !linksValid}
             >
               {submitting ? (
                 <>

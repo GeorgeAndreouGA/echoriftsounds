@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
+  extractYoutubeVideoId,
   isValidCategoryName,
+  isValidYoutubeUrl,
   migrateCategories,
   migratePublished,
   migrateScheduled,
@@ -53,27 +55,46 @@ describe('sortTracks', () => {
 describe('migratePublished', () => {
   it('upgrades the legacy string[] shape to PublishedTrack[]', () => {
     expect(migratePublished(['a.flac', 'b.mp3'])).toEqual([
-      { file: 'a.flac', category: null, position: 0 },
-      { file: 'b.mp3', category: null, position: 1 },
+      { file: 'a.flac', category: null, youtubeUrl: null, position: 0 },
+      { file: 'b.mp3', category: null, youtubeUrl: null, position: 1 },
     ]);
   });
 
   it('keeps already-migrated entries, adding the position they now carry', () => {
     expect(migratePublished([{ file: 'a.flac', category: 'pure-trance' }])).toEqual([
-      { file: 'a.flac', category: 'pure-trance', position: 0 },
+      { file: 'a.flac', category: 'pure-trance', youtubeUrl: null, position: 0 },
+    ]);
+  });
+
+  // Data written before this field existed (or by a build predating it) has
+  // no youtubeUrl at all — that is the normal legacy case, not a corrupt one,
+  // and must default to null rather than being dropped.
+  it('defaults a missing youtubeUrl to null rather than dropping the entry', () => {
+    expect(migratePublished([{ file: 'a.flac', category: null }])).toEqual([
+      { file: 'a.flac', category: null, youtubeUrl: null, position: 0 },
+    ]);
+  });
+
+  it('carries an existing youtubeUrl through unchanged', () => {
+    expect(
+      migratePublished([
+        { file: 'a.flac', category: null, youtubeUrl: 'https://youtu.be/dQw4w9WgXcQ' },
+      ]),
+    ).toEqual([
+      { file: 'a.flac', category: null, youtubeUrl: 'https://youtu.be/dQw4w9WgXcQ', position: 0 },
     ]);
   });
 
   it('tolerates a mixed-shape file mid-migration', () => {
     expect(migratePublished(['a.flac', { file: 'b.flac', category: 'hardcore' }])).toEqual([
-      { file: 'a.flac', category: null, position: 0 },
-      { file: 'b.flac', category: 'hardcore', position: 1 },
+      { file: 'a.flac', category: null, youtubeUrl: null, position: 0 },
+      { file: 'b.flac', category: 'hardcore', youtubeUrl: null, position: 1 },
     ]);
   });
 
   it('drops corrupt entries instead of crashing the API on boot', () => {
     expect(migratePublished([null, 42, {}, { file: 'ok.flac' }])).toEqual([
-      { file: 'ok.flac', category: null, position: 0 },
+      { file: 'ok.flac', category: null, youtubeUrl: null, position: 0 },
     ]);
   });
 
@@ -106,8 +127,8 @@ describe('migratePublished', () => {
       { file: 'b.flac', category: null, position: 5 },
     ];
     expect(migratePublished(raw)).toEqual([
-      { file: 'b.flac', category: null, position: 0 },
-      { file: 'a.flac', category: null, position: 1 },
+      { file: 'b.flac', category: null, youtubeUrl: null, position: 0 },
+      { file: 'a.flac', category: null, youtubeUrl: null, position: 1 },
     ]);
   });
 
@@ -127,14 +148,76 @@ describe('migratePublished', () => {
 });
 
 describe('migrateScheduled', () => {
-  it('defaults a missing category to null', () => {
+  it('defaults a missing category and youtubeUrl to null', () => {
     expect(migrateScheduled([{ file: 'a.flac', time: '2026-01-01T00:00:00Z' }])).toEqual([
-      { file: 'a.flac', time: '2026-01-01T00:00:00Z', category: null },
+      { file: 'a.flac', time: '2026-01-01T00:00:00Z', category: null, youtubeUrl: null },
+    ]);
+  });
+
+  it('carries an existing youtubeUrl through unchanged', () => {
+    expect(
+      migrateScheduled([
+        {
+          file: 'a.flac',
+          time: '2026-01-01T00:00:00Z',
+          category: 'trance',
+          youtubeUrl: 'https://youtu.be/dQw4w9WgXcQ',
+        },
+      ]),
+    ).toEqual([
+      {
+        file: 'a.flac',
+        time: '2026-01-01T00:00:00Z',
+        category: 'trance',
+        youtubeUrl: 'https://youtu.be/dQw4w9WgXcQ',
+      },
     ]);
   });
 
   it('drops entries missing a time', () => {
     expect(migrateScheduled([{ file: 'a.flac' }])).toEqual([]);
+  });
+});
+
+describe('extractYoutubeVideoId', () => {
+  const ID = 'dQw4w9WgXcQ';
+
+  it('extracts the id from every common URL shape', () => {
+    expect(extractYoutubeVideoId(`https://www.youtube.com/watch?v=${ID}`)).toBe(ID);
+    expect(extractYoutubeVideoId(`https://youtube.com/watch?v=${ID}`)).toBe(ID);
+    expect(extractYoutubeVideoId(`http://youtube.com/watch?v=${ID}`)).toBe(ID);
+    expect(extractYoutubeVideoId(`https://youtu.be/${ID}`)).toBe(ID);
+    expect(extractYoutubeVideoId(`https://www.youtube.com/shorts/${ID}`)).toBe(ID);
+    expect(extractYoutubeVideoId(`https://www.youtube.com/embed/${ID}`)).toBe(ID);
+    expect(extractYoutubeVideoId(`https://www.youtube-nocookie.com/embed/${ID}`)).toBe(ID);
+  });
+
+  it('ignores extra query params and a timestamp fragment', () => {
+    expect(
+      extractYoutubeVideoId(`https://www.youtube.com/watch?v=${ID}&list=PL123&t=42s`),
+    ).toBe(ID);
+    expect(extractYoutubeVideoId(`https://youtu.be/${ID}?t=90`)).toBe(ID);
+  });
+
+  it('rejects garbage and non-YouTube strings', () => {
+    expect(extractYoutubeVideoId('not a url')).toBeNull();
+    expect(extractYoutubeVideoId('https://vimeo.com/123456')).toBeNull();
+    expect(extractYoutubeVideoId('https://youtu.be/tooshort')).toBeNull();
+    expect(extractYoutubeVideoId('https://youtube.com/watch?v=')).toBeNull();
+    expect(extractYoutubeVideoId('')).toBeNull();
+  });
+
+  it('rejects non-strings', () => {
+    expect(extractYoutubeVideoId(null)).toBeNull();
+    expect(extractYoutubeVideoId(undefined)).toBeNull();
+    expect(extractYoutubeVideoId(42)).toBeNull();
+  });
+});
+
+describe('isValidYoutubeUrl', () => {
+  it('mirrors extractYoutubeVideoId', () => {
+    expect(isValidYoutubeUrl('https://youtu.be/dQw4w9WgXcQ')).toBe(true);
+    expect(isValidYoutubeUrl('garbage')).toBe(false);
   });
 });
 

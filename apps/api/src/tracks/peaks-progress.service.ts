@@ -9,18 +9,9 @@ export type PeaksJobStatus =
   | 'done'
   | 'failed';
 
-/**
- * Which half of the job is running. Publishing a track is peaks generation
- * followed by a transcode, and on a 2-hour track that split is ~12 s then ~58 s
- * — so a panel that calls the whole thing "peaks" is telling the admin the
- * wrong thing for 83% of the wait.
- */
-export type PeaksJobPhase = 'peaks' | 'stream';
-
 export interface PeaksJob {
   file: string;
   status: PeaksJobStatus;
-  phase?: PeaksJobPhase;
   startedAt?: number;
   finishedAt?: number;
   error?: string;
@@ -151,7 +142,6 @@ export class PeaksProgressService {
         this.jobs.set(file, {
           file,
           status: 'running',
-          phase: 'peaks',
           startedAt,
           attempt,
         });
@@ -165,18 +155,8 @@ export class PeaksProgressService {
           break;
         }
 
-        // The rest of the job is the transcode plus the published.json write.
-        // On a 2-hour track it is the large majority of the wall clock, so it
-        // gets its own phase rather than hiding behind "peaks".
-        this.jobs.set(file, {
-          file,
-          status: 'running',
-          phase: 'stream',
-          startedAt,
-          attempt,
-        });
-        this.emit();
-
+        // The rest of the job is just the published.json write — trivial now
+        // that there's no transcode step, so it doesn't need its own phase.
         await onReady(file);
         publishedOk = true;
       } catch (err) {

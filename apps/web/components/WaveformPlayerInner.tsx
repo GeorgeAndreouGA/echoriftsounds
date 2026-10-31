@@ -4,12 +4,14 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 import type { Variants } from 'framer-motion';
 import { animate, motion, useAnimationControls, useMotionValue, useTransform } from 'framer-motion';
 import type WaveSurferType from 'wavesurfer.js';
+import { extractYoutubeVideoId } from '@echorift/shared';
 import { useActiveTrack, autoPlayOnNext } from '../lib/activeTrack';
 import { useCoarsePointer } from '../lib/useCoarsePointer';
 import { useMotionTier } from '../lib/motion/useMotionTier';
 import { useDecayMount, useVariants } from './motion/variants';
 import { DUR, EASE, s } from './motion/tokens';
 import { withBase } from '../lib/api';
+import { YoutubeController, type YoutubePlayerState } from '../lib/youtube';
 import {
   PlayIcon,
   PauseIcon,
@@ -24,6 +26,14 @@ type Loop = 'OFF' | 'ONE' | 'ALL';
 
 interface Props {
   file: string;
+  /**
+   * The YouTube video this track plays through. Playback is YouTube-backed,
+   * not streamed off disk — null means the track predates that requirement
+   * (migratePublished leaves legacy entries at null) and has no playable
+   * source yet, so this renders a blocked state instead of a player. The
+   * DOWNLOAD button is unaffected either way: it's always `/audio/<file>`.
+   */
+  youtubeUrl: string | null;
 }
 
 function fmt(s: number) {
@@ -35,6 +45,10 @@ function fmt(s: number) {
 /** Half the hover bubble's min-width — how far from each end it stops tracking. */
 const BUBBLE_HALF = 30;
 
+// Rate limit on the touch overlay's real YouTube seeks during a drag (see
+// touchSeekLastRef above) — the visual cursor still moves every pointermove.
+const TOUCH_SEEK_THROTTLE_MS = 150;
+
 // The peaks fetch gets a deadline, like every admin call already does. Without
 // one a stalled response leaves the player showing LOADING forever.
 const PEAKS_TIMEOUT_MS = 15_000;
@@ -42,6 +56,13 @@ const PEAKS_TIMEOUT_MS = 15_000;
 // give up and play without a waveform rather than hanging on it.
 const PEAKS_POLL_ATTEMPTS = 6;
 const PEAKS_POLL_DELAY_MS = 5_000;
+
+// The IFrame API has to load its script, construct the embed and fetch the
+// video's own metadata before it calls onReady — generous because that's a
+// real network round trip to YouTube, not a local call. Longer than
+// PEAKS_TIMEOUT_MS on purpose: this is the slower of the two things being
+// awaited together below.
+const YT_READY_TIMEOUT_MS = 20_000;
 
 // Drawn when there are no peaks: a flat, dim line. Not decoration — it is the
 // visual half of "no waveform available", paired with the header text, and it
@@ -100,28 +121,6 @@ async function fetchPeaks(
     );
   }
   return null;
-}
-
-/**
- * Duration straight from the media element's metadata. `preload="metadata"`
- * fetches the container header only, so this costs a few KB rather than the
- * whole file — the distinction that makes the no-waveform path safe on a
- * 967 MB master.
- */
-function waitForDuration(el: HTMLAudioElement): Promise<number> {
-  return new Promise((resolve) => {
-    if (el.readyState >= 1 && Number.isFinite(el.duration)) {
-      resolve(el.duration);
-      return;
-    }
-    const done = () => {
-      clearTimeout(timer);
-      el.removeEventListener('loadedmetadata', done);
-      resolve(Number.isFinite(el.duration) ? el.duration : 0);
-    };
-    const timer = setTimeout(done, PEAKS_TIMEOUT_MS);
-    el.addEventListener('loadedmetadata', done);
-  });
 }
 
 function CtrlBtn({
@@ -232,9 +231,64 @@ function BeamLand({
   );
 }
 
-export function WaveformPlayerInner({ file }: Props) {
+/**
+ * The DOWNLOAD button is identical across every state (linked, missing,
+ * broken) because it's fully independent of YouTube — always `/audio/<file>`.
+ * Pulled out so the blocked states below don't duplicate it.
+ */
+function DownloadButton({ file }: { file: string }) {
+  return (
+    <a
+      href={withBase(`/audio/${encodeURIComponent(file)}`)}
+      download={file}
+      className="crt-btn small dl-btn"
+      aria-label={`Download ${file}`}
+    >
+      <DownloadIcon size={12} />
+      <span className="dl-text">DOWNLOAD</span>
+    </a>
+  );
+}
+
+/** Rendered instead of the waveform/video when there's no playable source —
+ * either the track predates the YouTube requirement, or its link is broken. */
+function BlockedPlayerFrame({
+  file,
+  message,
+}: {
+  file: string;
+  message: string;
+}) {
+  return (
+    <div className="crt-player-frame" aria-label={`Player for ${file}`}>
+      <div className="crt-player-header">
+        <span style={{ color: '#ff9933' }}>{message}</span>
+      </div>
+      <div
+        style={{
+          padding: '1rem 0.75rem',
+          color: '#8a5f00',
+          fontSize: '11px',
+          fontFamily: "var(--font-jetbrains-mono), monospace",
+          letterSpacing: '0.04em',
+        }}
+      >
+        &gt; PLAYBACK UNAVAILABLE. THE FILE CAN STILL BE DOWNLOADED BELOW.
+      </div>
+      <div className="crt-player-controls">
+        <div className="ctrl-group">
+          <DownloadButton file={file} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export function WaveformPlayerInner({ file, youtubeUrl }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
+  const videoContainerRef = useRef<HTMLDivElement>(null);
   const wsRef = useRef<WaveSurferType | null>(null);
+  const ytRef = useRef<YoutubeController | null>(null);
   const frameRef = useRef<HTMLDivElement>(null);
 
   // ── Hover readout ────────────────────────────────────────────────────────
@@ -267,12 +321,21 @@ export function WaveformPlayerInner({ file }: Props) {
 
   const scrubRef = useRef(false);
   const wasPlayingRef = useRef(false);
+  // Throttles the touch-overlay's ACTUAL YouTube seeks during a drag — each one
+  // is a real IFrame postMessage round trip, unlike the old local Range-request
+  // seeks this overlay used to issue. The visual cursor still updates every
+  // pointermove regardless; only the real seek is rate-limited.
+  const touchSeekLastRef = useRef(0);
 
   const [isPlaying, setIsPlaying] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   // Peaks could not be fetched: the track is fully playable, the waveform is a
   // flat placeholder, and the header says so instead of pretending.
   const [noWaveform, setNoWaveform] = useState(false);
+  // The YouTube embed itself failed (deleted/private/embedding disallowed) or
+  // never became ready in time — distinct from `!youtubeUrl`, which is the
+  // track simply never having had a link at all.
+  const [videoUnavailable, setVideoUnavailable] = useState(false);
   const [duration, setDuration] = useState(0);
   const [currentTime, setCurrentTime] = useState(0);
   const [loop, setLoop] = useState<Loop>('OFF');
@@ -325,10 +388,14 @@ export function WaveformPlayerInner({ file }: Props) {
   }, []);
 
   const seek = useCallback((delta: number) => {
-    if (!wsRef.current) return;
-    const d = wsRef.current.getDuration();
-    const c = wsRef.current.getCurrentTime();
-    wsRef.current.seekTo(Math.max(0, Math.min(1, (c + delta) / d)));
+    const yt = ytRef.current;
+    if (!yt) return;
+    const d = yt.getDuration();
+    if (!d) return;
+    // seekTo reports the new position via onTick (registered in the main
+    // effect below) immediately, synchronously — that's what moves the drawn
+    // cursor and `currentTime` without waiting for the next poll tick.
+    yt.seekTo(Math.max(0, Math.min(d, yt.getCurrentTime() + delta)));
   }, []);
 
   /**
@@ -478,7 +545,7 @@ export function WaveformPlayerInner({ file }: Props) {
       scrubRef.current = false;
       frameRef.current?.removeAttribute('data-scrubbing');
       if (wasPlayingRef.current) {
-        wsRef.current?.play();
+        ytRef.current?.play();
         wasPlayingRef.current = false;
       }
     };
@@ -490,62 +557,103 @@ export function WaveformPlayerInner({ file }: Props) {
   }, []);
 
   useEffect(() => {
-    if (!containerRef.current) return;
+    // No link (legacy track) or an unparseable one (shouldn't happen — the
+    // server validates on publish — but defensive): nothing to set up. The
+    // JSX below renders BlockedPlayerFrame instead in both cases.
+    const videoId = youtubeUrl ? extractYoutubeVideoId(youtubeUrl) : null;
+    if (!youtubeUrl || !videoId) {
+      setIsLoading(false);
+      setVideoUnavailable(!!youtubeUrl && !videoId);
+      return;
+    }
+    if (!containerRef.current || !videoContainerRef.current) return;
+
     let ws: WaveSurferType | null = null;
-    let mediaEl: HTMLAudioElement | null = null;
+    let yt: YoutubeController | null = null;
     let aborted = false;
 
-    // The effect re-runs on `file` without remounting, so last track's outcome
-    // would otherwise carry over into this one's header.
+    // The effect re-runs on `file`/`youtubeUrl` without remounting, so last
+    // track's outcome would otherwise carry over into this one's header.
     setIsLoading(true);
     setNoWaveform(false);
+    setVideoUnavailable(false);
+
+    // Mirrors playback position into a motion value for the preview fill, and
+    // into the React state that drives the timecode text. Declared here (not
+    // inside the IIFE below) because the YouTube controller's callbacks are
+    // constructed before `ws` exists — closures over the `ws`/`yt` `let`s
+    // above see their later-assigned values once this actually runs, exactly
+    // like the pre-YouTube version did for its media element.
+    const syncPlayhead = (t: number) => {
+      setCurrentTime(t);
+      const d = ws?.getDuration() ?? 0;
+      playheadXRef.current.set(d > 0 ? (t / d) * boxW.current : 0);
+      // Visual-only cursor move — wavesurfer has no real media backing it, so
+      // this never issues a network request.
+      ws?.setTime(t);
+    };
+
+    // Built via a resolve/reject pair captured here, rather than constructing
+    // `yt` inside the Promise executor itself — assigning the outer `let yt`
+    // from within that nested closure defeats TypeScript's narrowing of it
+    // everywhere else in this effect (it sees the declared type as possibly
+    // `never` past that point). Constructing `yt` directly in this scope,
+    // right after, keeps its type exactly `YoutubeController` from here on.
+    let resolveReady!: (dur: number) => void;
+    let rejectReady!: (err: Error) => void;
+    const ytReady = new Promise<number>((resolve, reject) => {
+      resolveReady = resolve;
+      rejectReady = reject;
+    });
+
+    const readyTimer = setTimeout(
+      () => rejectReady(new Error('YouTube player timed out')),
+      YT_READY_TIMEOUT_MS,
+    );
+    yt = new YoutubeController(videoContainerRef.current!, videoId, {
+      onReady: (dur) => {
+        clearTimeout(readyTimer);
+        resolveReady(dur);
+      },
+      onError: (code) => {
+        clearTimeout(readyTimer);
+        rejectReady(new Error(`YouTube error ${code}`));
+      },
+      onStateChange: (state: YoutubePlayerState) => {
+        // Guarded: scrubbing pauses/resumes playback itself, and without
+        // this the header would flash NOW PLAYING → STANDBY → NOW PLAYING
+        // on every drag.
+        if (state === 'playing' && !scrubRef.current) setIsPlaying(true);
+        if (state === 'paused' && !scrubRef.current) setIsPlaying(false);
+        if (state === 'ended') {
+          setIsPlaying(false);
+          if (loopRef.current === 'ONE') {
+            yt?.seekTo(0);
+            yt?.play();
+          } else if (loopRef.current === 'ALL') {
+            autoPlayOnNext.pending = true;
+            goNextRef.current();
+          }
+        }
+      },
+      onTick: syncPlayhead,
+    });
 
     (async () => {
-      const { default: WaveSurfer } = await import('wavesurfer.js');
-      if (aborted) return;
-
-      // Pre-computed peaks, or none at all — never a browser-side decode.
-      //
-      // This used to fall through to wavesurfer's `url:` mode whenever the
-      // peaks fetch failed, which downloads the whole file and runs
-      // decodeAudioData on it. On a 2-hour master that is a 967 MB transfer and
-      // a 2.38 GB AudioBuffer — ~3.3 GB of browser memory, a tab crash on
-      // desktop and a hard OOM on mobile. At 30 minutes it merely felt slow,
-      // which is why it never showed up in dev. Playback does not need it: the
-      // media element streams via Range requests perfectly well, so the honest
-      // degradation is to keep the audio and lose the picture.
-      const data = await fetchPeaks(file, () => aborted);
-      if (aborted) return;
-
-      mediaEl = document.createElement('audio');
-      mediaEl.preload = 'metadata';
-      // Play the small AAC proxy so seeking a 1–2 hr master fetches ~1/10 the
-      // bytes. If it isn't transcoded (either not yet, or deliberately skipped
-      // because the source is already a small compressed file), fall back to
-      // the original so playback always works.
-      mediaEl.src = withBase(`/stream/${encodeURIComponent(file)}.m4a`);
-      let usedFallback = false;
-      mediaEl.addEventListener('error', () => {
-        if (mediaEl && !usedFallback) {
-          usedFallback = true;
-          mediaEl.src = withBase(`/audio/${encodeURIComponent(file)}`);
-          mediaEl.load();
-        }
-      });
-
-      // Without peaks we still need a duration for the seek bar and timecode.
-      // Metadata gives it for the cost of the container header.
-      const dur = data ? data.duration : await waitForDuration(mediaEl);
+      const [{ default: WaveSurfer }, data, dur] = await Promise.all([
+        import('wavesurfer.js'),
+        // Pre-computed peaks, or none at all — never a browser-side decode.
+        // The waveform reflects the HDD master; playback is YouTube's own
+        // copy of the same content, which is why `dur` below prefers
+        // YouTube's own reported duration — that's what seeking actually
+        // operates against.
+        fetchPeaks(file, () => aborted),
+        ytReady,
+      ]);
       if (aborted) return;
 
       setNoWaveform(!data);
       setDuration(dur);
-
-      const peaksOpts = {
-        peaks: [data ? data.peaks : FLAT_PEAKS],
-        duration: dur,
-        media: mediaEl,
-      };
 
       ws = WaveSurfer.create({
         container: containerRef.current!,
@@ -561,70 +669,38 @@ export function WaveformPlayerInner({ file }: Props) {
         // Mouse users could not scrub at all before this — the option defaults
         // false. It is also a precondition for the dragstart/drag/dragend events
         // existing: wavesurfer only calls initDrag() when this is truthy, so
-        // there is no hooks-without-behaviour option to pick instead.
+        // there is no hooks-without-behaviour option to pick instead. No
+        // `media`/`url` here: this instance never plays anything itself, it
+        // only draws the peaks and reports pointer gestures — YouTube (via
+        // `yt`, already constructed above) is the sole playback authority.
         dragToSeek: true,
-        ...peaksOpts,
+        peaks: [data ? data.peaks : FLAT_PEAKS],
+        duration: dur,
       });
       wsRef.current = ws;
-      ws.setVolume(0.8);
+      ytRef.current = yt;
+      yt?.setVolume(80);
 
-      ws.on('ready', (dur: unknown) => {
-        setDuration(dur as number);
-        setIsLoading(false);
-        if (autoPlayOnNext.pending) {
-          autoPlayOnNext.pending = false;
-          ws?.play();
-        }
-      });
-      // Peaks mode is the only mode now: duration is known up front and 'ready'
-      // fires synchronously, so there is nothing left to wait for.
       setIsLoading(false);
       if (autoPlayOnNext.pending) {
         autoPlayOnNext.pending = false;
-        ws.play();
+        yt?.play();
       }
 
-      // Mirrors playback position into a motion value for the preview fill. The
-      // setState is pre-existing (it drives the timecode text); the .set() adds no
-      // render of its own.
-      const syncPlayhead = (t: number) => {
-        const d = ws?.getDuration() ?? 0;
-        playheadXRef.current.set(d > 0 ? (t / d) * boxW.current : 0);
-      };
-      ws.on('audioprocess', (t: unknown) => {
-        setCurrentTime(t as number);
-        syncPlayhead(t as number);
+      ws.on('click', (relX: unknown) => {
+        flashAtRef.current(relX as number);
+        ytRef.current?.seekTo((relX as number) * dur);
       });
-      ws.on('seeking', (t: unknown) => {
-        setCurrentTime(t as number);
-        syncPlayhead(t as number);
-      });
-      // Guarded: scrubbing pauses and resumes the media, and without this the
-      // header would flash NOW PLAYING → STANDBY → NOW PLAYING on every drag.
-      ws.on('play', () => {
-        if (!scrubRef.current) setIsPlaying(true);
-      });
-      ws.on('pause', () => {
-        if (!scrubRef.current) setIsPlaying(false);
-      });
-
-      ws.on('click', (relX: unknown) => flashAtRef.current(relX as number));
 
       /**
-       * Scrub like tape: pause on grab, resume on release.
-       *
-       * Not cosmetic. wavesurfer sets its drag debounce to 0 unconditionally while
-       * playing, so a drag issues one media seek per pointer move — ~120 range
-       * requests for a two-second drag on a 90-minute file, against a 1-CPU box.
-       * Paused, drags take the 200ms debounce, which is clearTimeout-reset on
-       * every move, so a continuous drag issues NO seek at all and one lands on
-       * release. Visual feedback is unaffected either way: wavesurfer's
-       * renderProgress() tracks the pointer at full frame rate regardless.
+       * Scrub like tape: pause on grab, resume on release. wavesurfer's own
+       * renderProgress() tracks the pointer at full frame rate regardless —
+       * this is about the ACTUAL YouTube playback, not the visual.
        */
       ws.on('dragstart', () => {
         scrubRef.current = true;
-        wasPlayingRef.current = ws?.isPlaying() ?? false;
-        if (wasPlayingRef.current) ws?.pause();
+        wasPlayingRef.current = ytRef.current?.isPlaying() ?? false;
+        if (wasPlayingRef.current) ytRef.current?.pause();
         frameRef.current?.setAttribute('data-scrubbing', '');
         // Once the real playhead is tracking the pointer it IS the cursor; two
         // lines on the same pixel is noise. The bubble stays — the target
@@ -644,20 +720,11 @@ export function WaveformPlayerInner({ file }: Props) {
         scrubRef.current = false;
         frameRef.current?.removeAttribute('data-scrubbing');
         ws?.seekTo(relX as number);
+        ytRef.current?.seekTo((relX as number) * dur);
         flashAtRef.current(relX as number);
         if (wasPlayingRef.current) {
-          ws?.play();
+          ytRef.current?.play();
           wasPlayingRef.current = false;
-        }
-      });
-      ws.on('finish', () => {
-        setIsPlaying(false);
-        if (loopRef.current === 'ONE') {
-          ws?.seekTo(0);
-          ws?.play();
-        } else if (loopRef.current === 'ALL') {
-          autoPlayOnNext.pending = true;
-          goNextRef.current();
         }
       });
       ws.on('error', (err: unknown) => {
@@ -666,19 +733,20 @@ export function WaveformPlayerInner({ file }: Props) {
       });
     })().catch((err) => {
       console.error('[WaveformPlayer]', err);
-      setIsLoading(false);
+      if (!aborted) {
+        setVideoUnavailable(true);
+        setIsLoading(false);
+      }
     });
 
     return () => {
       aborted = true;
       ws?.destroy();
-      if (mediaEl) {
-        mediaEl.pause();
-        mediaEl.src = '';
-        mediaEl.load();
-      }
+      yt?.destroy();
+      wsRef.current = null;
+      ytRef.current = null;
     };
-  }, [file]);
+  }, [file, youtubeUrl]);
 
   /**
    * Jump to an absolute position, with the same landing acknowledgement a click
@@ -689,9 +757,12 @@ export function WaveformPlayerInner({ file }: Props) {
   const seekToPct = useCallback(
     (pct: number) => {
       const ws = wsRef.current;
-      if (!ws) return;
+      const yt = ytRef.current;
+      if (!ws || !yt) return;
       const p = Math.min(1, Math.max(0, pct));
-      ws.seekTo(p);
+      ws.seekTo(p); // visual only — see the note above the effect that creates `ws`
+      const d = yt.getDuration();
+      if (d) yt.seekTo(p * d);
       flashAtRef.current(p);
     },
     [],
@@ -702,7 +773,12 @@ export function WaveformPlayerInner({ file }: Props) {
     const onKey = (e: KeyboardEvent) => {
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
       switch (e.key) {
-        case ' ': e.preventDefault(); wsRef.current?.playPause(); break;
+        case ' ': {
+          e.preventDefault();
+          const yt = ytRef.current;
+          if (yt) { if (yt.isPlaying()) yt.pause(); else yt.play(); }
+          break;
+        }
         case 'ArrowLeft': seek(-5); break;
         case 'ArrowRight': seek(5); break;
         case 'j': case 'J': seek(-10); break;
@@ -757,6 +833,15 @@ export function WaveformPlayerInner({ file }: Props) {
             scaleY: [1, 0.96, 1.02, 1],
             filter: ['none', 'saturate(3) hue-rotate(20deg)', 'none'],
           };
+
+  // Hooks above all run unconditionally every render regardless of which of
+  // these paths is taken — only the JSX they produce differs.
+  if (!youtubeUrl) {
+    return <BlockedPlayerFrame file={file} message="NO VIDEO LINKED" />;
+  }
+  if (videoUnavailable) {
+    return <BlockedPlayerFrame file={file} message="VIDEO UNAVAILABLE" />;
+  }
 
   return (
     <motion.div
@@ -841,6 +926,12 @@ export function WaveformPlayerInner({ file }: Props) {
             </span>
           </>
         )}
+      </div>
+
+      {/* Video — the actual playback source, kept off-screen (not shown to
+          the listener); see the comment on .crt-player-video in globals.css. */}
+      <div className="crt-player-video">
+        <div ref={videoContainerRef} aria-hidden />
       </div>
 
       {/* Waveform */}
@@ -1007,16 +1098,39 @@ export function WaveformPlayerInner({ file }: Props) {
             role="presentation"
             onPointerDown={(e) => {
               const ws = wsRef.current;
-              if (!ws) return;
+              const yt = ytRef.current;
+              if (!ws || !yt) return;
               (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
               const ratio = ratioFromClientX(e.clientX);
-              if (ratio !== null) ws.seekTo(ratio);
+              if (ratio === null) return;
+              ws.seekTo(ratio);
+              const d = yt.getDuration();
+              if (d) yt.seekTo(ratio * d);
+              touchSeekLastRef.current = Date.now();
             }}
             onPointerMove={(e) => {
               const ws = wsRef.current;
-              if (!ws || e.buttons === 0) return;
+              const yt = ytRef.current;
+              if (!ws || !yt || e.buttons === 0) return;
               const ratio = ratioFromClientX(e.clientX);
-              if (ratio !== null) ws.seekTo(ratio);
+              if (ratio === null) return;
+              ws.seekTo(ratio); // visual every move; the real seek is throttled below
+              const now = Date.now();
+              if (now - touchSeekLastRef.current < TOUCH_SEEK_THROTTLE_MS) return;
+              touchSeekLastRef.current = now;
+              const d = yt.getDuration();
+              if (d) yt.seekTo(ratio * d);
+            }}
+            onPointerUp={(e) => {
+              const yt = ytRef.current;
+              if (!yt) return;
+              // Commit the final position even if it landed inside the
+              // throttle window above, so a drag never ends short of where
+              // the visual cursor (and the finger) actually stopped.
+              const ratio = ratioFromClientX(e.clientX);
+              if (ratio === null) return;
+              const d = yt.getDuration();
+              if (d) yt.seekTo(ratio * d);
             }}
             className="cur-pointer"
             style={{
@@ -1042,7 +1156,13 @@ export function WaveformPlayerInner({ file }: Props) {
           <CtrlBtn onClick={goPrev} label="Previous track">
             <PrevIcon />
           </CtrlBtn>
-          <CtrlBtn onClick={() => wsRef.current?.playPause()} label={isPlaying ? 'Pause' : 'Play'}>
+          <CtrlBtn
+            onClick={() => {
+              const yt = ytRef.current;
+              if (yt) { if (yt.isPlaying()) yt.pause(); else yt.play(); }
+            }}
+            label={isPlaying ? 'Pause' : 'Play'}
+          >
             {isPlaying ? <PauseIcon /> : <PlayIcon />}
           </CtrlBtn>
           <CtrlBtn onClick={goNext} label="Next track">
@@ -1071,15 +1191,7 @@ export function WaveformPlayerInner({ file }: Props) {
           LOOP {loop}
         </button>
 
-        <a
-          href={withBase(`/audio/${encodeURIComponent(file)}`)}
-          download={file}
-          className="crt-btn small dl-btn"
-          aria-label={`Download ${file}`}
-        >
-          <DownloadIcon size={12} />
-          <span className="dl-text">DOWNLOAD</span>
-        </a>
+        <DownloadButton file={file} />
         </div>
       </div>
     </motion.div>

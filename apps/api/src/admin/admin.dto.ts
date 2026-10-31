@@ -35,14 +35,33 @@ class ScheduledItemDto {
   @IsOptional()
   @IsString()
   category?: string | null;
+
+  // Required: playback is YouTube-backed now, so a scheduled track needs its
+  // link just as much as an instantly-published one does. Semantic validation
+  // (does it actually parse to a video id) happens in AdminService via
+  // isValidYoutubeUrl — this DTO only enforces "a string was sent".
+  @IsString()
+  youtubeUrl!: string;
+}
+
+/** One file + the YouTube link it plays through. 1:1, unlike category (which
+ * is legitimately shared across a whole publish batch) — every file in a
+ * publish call carries its own link. */
+class PublishFileDto {
+  @IsString()
+  file!: string;
+
+  @IsString()
+  youtubeUrl!: string;
 }
 
 export class PublishDto {
   @IsOptional()
-  @Transform(({ value }) => toArray<string>(value))
+  @Transform(({ value }) => toArray<unknown>(value))
   @IsArray()
-  @IsString({ each: true })
-  files?: string[];
+  @ValidateNested({ each: true })
+  @Type(() => PublishFileDto)
+  files?: PublishFileDto[];
 
   @IsOptional()
   @Transform(({ value }) => toArray<unknown>(value))
@@ -121,4 +140,16 @@ export class ReorderDto {
   @IsArray()
   @IsString({ each: true })
   files?: string[];
+}
+
+export class UpdateYoutubeUrlDto {
+  @IsOptional()
+  @Transform(({ value }) => toArray<string>(value))
+  @IsArray()
+  @IsString({ each: true })
+  files?: string[];
+
+  @IsOptional()
+  @IsString()
+  youtubeUrl?: string;
 }

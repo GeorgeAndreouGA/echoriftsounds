@@ -45,8 +45,16 @@ RUN pnpm --filter @echorift/shared build
 FROM shared-build AS api-build
 COPY apps/api/ apps/api/
 RUN pnpm --filter @echorift/api build
+# `COPY` preserves mode bits from the build context, and the runner below runs as
+# uid 1000 — so a locked-down checkout (e.g. scripts/harden-permissions.sh) would
+# otherwise bake unreadable files into the image. Only @echorift/shared crosses
+# that boundary (every other dep is fetched in-image with umask 022), and its
+# package.json alone is enough to break module resolution. Normalise here, in the
+# build stage, so the extra layer is discarded rather than shipped: `a+rX` adds
+# read for all and search/execute only on dirs and already-executable files.
 RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store \
-    pnpm --filter @echorift/api --prod deploy --legacy /deploy
+    pnpm --filter @echorift/api --prod deploy --legacy /deploy \
+ && chmod -R a+rX /deploy
 
 # ---- api-runner ----
 FROM node:22-alpine AS api-runner
@@ -85,6 +93,12 @@ COPY apps/web/ apps/web/
 RUN node apps/web/scripts/check-motion-tokens.mjs
 RUN --mount=type=cache,id=next-cache,target=/workspace/apps/web/.next/cache \
     pnpm --filter @echorift/web build
+# Same reason as api-build above: `public/` is copied from the build context, so
+# host modes would otherwise follow the icons into the image and the uid-1000
+# server could not read the assets it serves.
+RUN chmod -R a+rX /workspace/apps/web/.next/standalone \
+                  /workspace/apps/web/.next/static \
+                  /workspace/apps/web/public
 
 # ---- web-runner ----
 FROM node:22-alpine AS web-runner

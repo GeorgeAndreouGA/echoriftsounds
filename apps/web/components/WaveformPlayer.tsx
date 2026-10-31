@@ -21,6 +21,12 @@ const WaveformPlayerInner = dynamic(
   },
 );
 
-export function WaveformPlayer({ file }: { file: string }) {
-  return <WaveformPlayerInner file={file} />;
+export function WaveformPlayer({
+  file,
+  youtubeUrl,
+}: {
+  file: string;
+  youtubeUrl: string | null;
+}) {
+  return <WaveformPlayerInner file={file} youtubeUrl={youtubeUrl} />;
 }

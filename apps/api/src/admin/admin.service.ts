@@ -1,11 +1,16 @@
 import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import * as fs from 'fs/promises';
-import { CategoryId, ScheduledTrack, isValidFilename } from '@echorift/shared';
+import { CategoryId, ScheduledTrack, isValidFilename, isValidYoutubeUrl } from '@echorift/shared';
 import { StorageService } from '../storage/storage.service';
 import { CategoriesService } from '../categories/categories.service';
 import { PeaksService } from '../tracks/peaks.service';
 import { PeaksProgressService } from '../tracks/peaks-progress.service';
-import { TranscodeService } from '../tracks/transcode.service';
+
+/** A file about to be published, paired with the YouTube link it plays through. */
+export interface PublishFile {
+  file: string;
+  youtubeUrl: string;
+}
 
 @Injectable()
 export class AdminService {
@@ -16,7 +21,6 @@ export class AdminService {
     private readonly categories: CategoriesService,
     private readonly peaks: PeaksService,
     private readonly peaksProgress: PeaksProgressService,
-    private readonly transcode: TranscodeService,
   ) {}
 
   async listFiles(): Promise<string[]> {
@@ -31,13 +35,26 @@ export class AdminService {
   }
 
   async publish(
-    files: string[],
+    files: PublishFile[],
     scheduled: ScheduledTrack[],
     category: CategoryId | null = null,
   ): Promise<void> {
-    const invalidFiles = files.filter((f) => !isValidFilename(f));
+    const invalidFiles = files.filter((f) => !isValidFilename(f.file));
     if (invalidFiles.length > 0) {
-      throw new BadRequestException(`Invalid filenames: ${invalidFiles.join(', ')}`);
+      throw new BadRequestException(
+        `Invalid filenames: ${invalidFiles.map((f) => f.file).join(', ')}`,
+      );
+    }
+
+    // Playback is YouTube-backed, not streamed off disk — a track with no
+    // playable link is a track nobody can hear, so the link is required at
+    // publish time, same as category. isValidYoutubeUrl resolves it to a real
+    // video id, not just "some non-empty string".
+    const invalidYoutube = files.filter((f) => !isValidYoutubeUrl(f.youtubeUrl));
+    if (invalidYoutube.length > 0) {
+      throw new BadRequestException(
+        `Invalid or missing YouTube links: ${invalidYoutube.map((f) => f.file).join(', ')}`,
+      );
     }
 
     const invalidScheduled = scheduled.filter(
@@ -49,6 +66,13 @@ export class AdminService {
     );
     if (invalidScheduled.length > 0) {
       throw new BadRequestException('Invalid scheduled items');
+    }
+
+    const invalidScheduledYoutube = scheduled.filter((item) => !isValidYoutubeUrl(item.youtubeUrl));
+    if (invalidScheduledYoutube.length > 0) {
+      throw new BadRequestException(
+        `Invalid or missing YouTube links: ${invalidScheduledYoutube.map((i) => i.file).join(', ')}`,
+      );
     }
 
     // Every track must land in a category — uncategorized publishing is no
@@ -74,11 +98,12 @@ export class AdminService {
       // Whitelist the persisted shape explicitly rather than spreading `{...item}`:
       // the body is untyped, so any extra properties a client sends (e.g. `evil`,
       // `position`) would otherwise be written verbatim into scheduled.json. Only
-      // file, time and the resolved category are ours to store.
+      // file, time, the resolved category and the YouTube link are ours to store.
       const withCategory = scheduled.map((item) => ({
         file: item.file,
         time: item.time,
         category: item.category ?? category ?? null,
+        youtubeUrl: item.youtubeUrl ?? null,
       }));
       await this.storage.scheduled.update((current) => [...current, ...withCategory]);
     }
@@ -94,16 +119,23 @@ export class AdminService {
     // completion order, so a batch's relative order among itself is arbitrary —
     // the admin drags them where they belong afterwards.
     if (files.length > 0) {
-      this.peaksProgress.publishWhenReady(files, async (file) => {
-        // Generate the playback stream before the track goes public, so the
-        // first visitor already gets the fast /stream/<file> proxy. Runs inside
-        // the peaks retry/semaphore, so a transcode failure retries too and the
-        // track isn't published until both peaks and stream exist.
-        await this.transcode.ensure(file);
+      // onReady only receives the filename (it's PeaksProgressService's own
+      // generic contract), so the per-file link it needs to write has to be
+      // captured here rather than threaded through that call.
+      const youtubeUrlByFile = new Map(files.map((f) => [f.file, f.youtubeUrl]));
+      this.peaksProgress.publishWhenReady(files.map((f) => f.file), async (file) => {
         await this.storage.published.update((current) =>
           current.some((t) => t.file === file)
             ? current
-            : [...current, { file, category, position: current.length }],
+            : [
+                ...current,
+                {
+                  file,
+                  category,
+                  youtubeUrl: youtubeUrlByFile.get(file) ?? null,
+                  position: current.length,
+                },
+              ],
         );
       });
     }
@@ -124,9 +156,7 @@ export class AdminService {
     // Drop the cached peaks JSON so a future republish goes through the full
     // generation pipeline again, and clear any progress entries so the admin
     // UI doesn't keep showing rows for the now-removed tracks.
-    await Promise.all(
-      filesToDelete.flatMap((f) => [this.peaks.delete(f), this.transcode.delete(f)]),
-    );
+    await Promise.all(filesToDelete.map((f) => this.peaks.delete(f)));
     this.peaksProgress.forget(filesToDelete);
   }
 
@@ -189,5 +219,30 @@ export class AdminService {
     await this.storage.published.update((current) =>
       current.map((t) => (targets.has(t.file) ? { ...t, category } : t)),
     );
+  }
+
+  /**
+   * Set (or fix) the YouTube link an already-published track plays through.
+   * Covers both link-rot on an existing track and backfilling the legacy
+   * tracks that predate this field (migratePublished leaves those at `null`).
+   * There is no "clear" path here — same spirit as category, every published
+   * track is meant to have exactly one playable source; to remove a link
+   * entirely, unpublish and republish.
+   */
+  async updateYoutubeUrl(files: string[], youtubeUrl: string): Promise<void> {
+    const invalid = files.filter((f) => !isValidFilename(f));
+    if (invalid.length > 0) {
+      throw new BadRequestException(`Invalid filenames: ${invalid.join(', ')}`);
+    }
+    if (!isValidYoutubeUrl(youtubeUrl)) {
+      throw new BadRequestException('A valid YouTube link is required.');
+    }
+
+    const targets = new Set(files);
+    await this.storage.published.update((current) =>
+      current.map((t) => (targets.has(t.file) ? { ...t, youtubeUrl } : t)),
+    );
+
+    this.logger.log(`youtube link updated for ${files.join(', ')}`);
   }
 }

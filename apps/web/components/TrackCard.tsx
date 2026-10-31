@@ -12,6 +12,7 @@ import { PlayIcon, StatusDot } from './icons/CrtIcons';
 interface Props {
   file: string;
   index: number;
+  youtubeUrl: string | null;
 }
 
 function GlitchFilename({ name, active }: { name: string; active: boolean }) {
@@ -67,7 +68,7 @@ function PhosphorTrail({ variants, onDone }: { variants: Variants; onDone: () =>
   );
 }
 
-export function TrackCard({ file, index }: Props) {
+export function TrackCard({ file, index, youtubeUrl }: Props) {
   const { activeFile, setActiveFile } = useActiveTrack();
   const isActive = activeFile === file;
 
@@ -175,7 +176,7 @@ export function TrackCard({ file, index }: Props) {
             style={{ overflow: 'hidden' }}
           >
             <div style={{ padding: '0 0 0.75rem 0' }}>
-              <WaveformPlayer file={file} />
+              <WaveformPlayer file={file} youtubeUrl={youtubeUrl} />
             </div>
           </motion.div>
         )}

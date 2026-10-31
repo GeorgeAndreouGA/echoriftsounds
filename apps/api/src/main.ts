@@ -45,8 +45,8 @@ class AllExceptionsFilter implements ExceptionFilter {
 
 async function bootstrap() {
   // Owner-only by default for everything the app creates — the peaks JSON, the
-  // transcoded streams, the JSON stores and their temp files. Combined with the
-  // 700 data dirs, nothing the process writes is readable by any other uid.
+  // JSON stores and their temp files. Combined with the 700 data dirs, nothing
+  // the process writes is readable by any other uid.
   process.umask(0o077);
 
   const app = await NestFactory.create<NestExpressApplication>(AppModule, {
@@ -64,15 +64,15 @@ async function bootstrap() {
   const basePath = (process.env.BASE_PATH || '').replace(/\/+$/, '');
   const apiPrefix = basePath ? `${basePath.slice(1)}/api` : 'api';
 
-  // Gate the byte routes on publish state. /audio and /stream are static mounts
-  // over the whole music/stream dirs, so without this any file on disk is
-  // fetchable by name — published or not — which defeats scheduled releases.
-  // Registered before the static handlers so an unpublished (or unknown) name
-  // 404s before serve-static ever touches the filesystem. The set is refreshed
-  // from published.json on every store-change broadcast.
+  // Gate the byte route on publish state. /audio is a static mount over the
+  // whole music dir (used for downloads — playback is YouTube-backed, not
+  // streamed off it), so without this any file on disk is fetchable by name —
+  // published or not — which defeats scheduled releases. Registered before the
+  // static handler so an unpublished (or unknown) name 404s before serve-static
+  // ever touches the filesystem. The set is refreshed from published.json on
+  // every store-change broadcast.
   const access = app.get(PublishedAccessService, { strict: false });
-  app.use(`${basePath}/audio`, access.gate('audio'));
-  app.use(`${basePath}/stream`, access.gate('stream'));
+  app.use(`${basePath}/audio`, access.gate());
 
   // Serve music files at <basePath>/audio/:file. Range requests are honored by
   // serve-static; explicit Accept-Ranges advertises that. Long max-age +
@@ -96,25 +96,6 @@ async function bootstrap() {
         'Content-Disposition',
         `inline; filename*=UTF-8''${encodeURIComponent(name)}`,
       );
-    },
-  });
-
-  // Serve the compressed playback streams at <basePath>/stream/:file.m4a. These
-  // are the small AAC proxies the player uses so seeking a 1–2 hr master only
-  // fetches ~1/10 the bytes. Same Range + immutable-cache semantics as /audio;
-  // the DATA_DIR/stream volume persists them across restarts.
-  const streamDir = path.join(process.env.DATA_DIR || './data', 'stream');
-  app.useStaticAssets(streamDir, {
-    prefix: `${basePath}/stream`,
-    etag: true,
-    lastModified: true,
-    setHeaders: (res, filePath) => {
-      res.setHeader('Accept-Ranges', 'bytes');
-      res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
-      res.setHeader('X-Content-Type-Options', 'nosniff');
-      if (filePath.endsWith('.m4a')) {
-        res.setHeader('Content-Type', 'audio/mp4');
-      }
     },
   });
 

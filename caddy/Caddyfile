@@ -33,39 +33,25 @@
 	# a 2-hour track is ~123 KB uncompressed and ~29 KB gzipped (23.6%), paid by
 	# every first-time listener on every long track. Audio is excluded by path —
 	# it is already compressed, so gzipping it would burn CPU for nothing, and
-	# the /audio and /stream handlers below deliberately stream unbuffered.
+	# the /audio handler below deliberately streams unbuffered.
 	# (Caddy's default encode matcher would also skip audio/* content types;
 	# the path matcher makes that independent of Caddy's defaults.)
 	# `encode` sets Vary: Accept-Encoding itself, so shared caches stay correct.
-	@compressible not path {$BASE_PATH}/audio/* {$BASE_PATH}/stream/*
+	@compressible not path {$BASE_PATH}/audio/*
 	encode @compressible zstd gzip
 
 	# REST API and static music streaming go straight to the NestJS service.
 	handle {$BASE_PATH}/api/* {
 		reverse_proxy api:3001
 	}
-	# Long-form audio streaming. flush_interval -1 disables Caddy buffering so
-	# bytes leave the proxy as soon as Express writes them; zero read/write
-	# timeouts let a single socket carry a multi-hour download or stay idle
-	# between Range chunks. Stripping Accept-Encoding prevents any future
-	# upstream middleware from gzipping (incompressible) audio.
+	# Audio downloads. Playback is YouTube-backed (not streamed off disk) —
+	# this route only serves the DOWNLOAD button and any direct link. flush_interval
+	# -1 disables Caddy buffering so bytes leave the proxy as soon as Express
+	# writes them; zero read/write timeouts let a single socket carry a
+	# multi-hour download or stay idle between Range chunks. Stripping
+	# Accept-Encoding prevents any future upstream middleware from gzipping
+	# (incompressible) audio.
 	handle {$BASE_PATH}/audio/* {
-		reverse_proxy api:3001 {
-			flush_interval -1
-			transport http {
-				read_timeout 0
-				write_timeout 0
-				dial_timeout 10s
-				response_header_timeout 30s
-				keepalive 2m
-				keepalive_idle_conns 64
-			}
-			header_up -Accept-Encoding
-		}
-	}
-	# Compressed playback streams (AAC/M4A proxies). Same streaming tuning as
-	# /audio: unbuffered passthrough so Range chunks leave immediately, no gzip.
-	handle {$BASE_PATH}/stream/* {
 		reverse_proxy api:3001 {
 			flush_interval -1
 			transport http {

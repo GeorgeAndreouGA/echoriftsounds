@@ -7,12 +7,10 @@ import * as api from '../lib/api';
 import { Caret } from './icons/CrtIcons';
 
 type JobStatus = 'queued' | 'running' | 'retrying' | 'done' | 'failed';
-type JobPhase = 'peaks' | 'stream';
 
 interface PeaksJob {
   file: string;
   status: JobStatus;
-  phase?: JobPhase;
   startedAt?: number;
   finishedAt?: number;
   error?: string;
@@ -47,13 +45,6 @@ const STATUS_LABEL: Record<JobStatus, string> = {
   retrying: 'RETRYING',
   done: 'DONE',
   failed: 'FAILED',
-};
-
-// What a running job is actually doing. On a 2-hour track the transcode is ~58s
-// of the ~70s, so showing "PEAKS" throughout was wrong for most of the wait.
-const PHASE_LABEL: Record<JobPhase, string> = {
-  peaks: 'PEAKS',
-  stream: 'STREAM',
 };
 
 function fmtDuration(ms: number): string {
@@ -254,19 +245,6 @@ export function AdminPeaksProgress({ authed, csrfToken, onComplete }: Props) {
                     STATUS_LABEL[job.status]
                   )}
                 </span>
-                {job.status === 'running' && job.phase && (
-                  <span
-                    style={{
-                      minWidth: '3.5rem',
-                      color: '#8a5f00',
-                      fontSize: '10px',
-                      letterSpacing: '0.06em',
-                      flexShrink: 0,
-                    }}
-                  >
-                    {PHASE_LABEL[job.phase]}
-                  </span>
-                )}
                 <span
                   style={{
                     flex: 1,

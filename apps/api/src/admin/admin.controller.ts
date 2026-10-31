@@ -32,6 +32,7 @@ import {
   RenameCategoryDto,
   ReorderDto,
   ScheduledDeleteDto,
+  UpdateYoutubeUrlDto,
 } from './admin.dto';
 import { CategoriesService } from '../categories/categories.service';
 import { StorageService } from '../storage/storage.service';
@@ -143,7 +144,7 @@ export class AdminController {
 
   @Post('publish')
   @ApiOperation({ summary: 'Publish files immediately or schedule them for a future release' })
-  @ApiBody({ schema: { properties: { files: { oneOf: [{ type: 'string' }, { type: 'array', items: { type: 'string' } }] }, scheduled: { description: 'ScheduledTrack or array' }, category: { type: 'string', nullable: true, description: 'Category id applied to the whole batch' } } } })
+  @ApiBody({ schema: { properties: { files: { type: 'array', items: { type: 'object', properties: { file: { type: 'string' }, youtubeUrl: { type: 'string' } } } }, scheduled: { description: 'ScheduledTrack (with youtubeUrl) or array' }, category: { type: 'string', nullable: true, description: 'Category id applied to the whole batch' } } } })
   @ApiOkResponse({ description: '{ ok: true }' })
   async publish(@Body() body: PublishDto) {
     if (!body.files && !body.scheduled) {
@@ -281,6 +282,22 @@ export class AdminController {
       throw new BadRequestException('No files given');
     }
     await this.adminService.reorder(files);
+    return { ok: true };
+  }
+
+  @Post('tracks/youtube')
+  @ApiOperation({ summary: 'Set/fix the YouTube link a published track plays through' })
+  @ApiBody({ schema: { properties: { files: { oneOf: [{ type: 'string' }, { type: 'array', items: { type: 'string' } }] }, youtubeUrl: { type: 'string' } } } })
+  @ApiOkResponse({ description: '{ ok: true }' })
+  async updateYoutubeUrl(@Body() body: UpdateYoutubeUrlDto) {
+    const files = body.files ? (Array.isArray(body.files) ? body.files : [body.files]) : [];
+    if (files.length === 0) {
+      throw new BadRequestException('No files given');
+    }
+    if (!body.youtubeUrl) {
+      throw new BadRequestException('A YouTube link is required.');
+    }
+    await this.adminService.updateYoutubeUrl(files, body.youtubeUrl);
     return { ok: true };
   }
 }

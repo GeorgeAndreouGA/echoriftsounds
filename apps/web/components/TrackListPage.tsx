@@ -11,7 +11,6 @@ import { Hero } from './hero/Hero';
 import { useActiveTrack } from '../lib/activeTrack';
 import { useLiveChanges } from '../hooks/useLiveChanges';
 import { useStaggeredVariants, useVariants } from './motion/variants';
-import { DUR, EASE, s } from './motion/tokens';
 
 interface Props {
   tracks: PublishedTrack[];
@@ -227,7 +226,7 @@ export function TrackListPage({
                     animate="visible"
                     exit="exit"
                   >
-                    <TrackCard file={track.file} index={i + 1} />
+                    <TrackCard file={track.file} index={i + 1} youtubeUrl={track.youtubeUrl} />
                   </motion.div>
                 ))}
               </AnimatePresence>

@@ -77,9 +77,15 @@ export async function adminCategories(): Promise<Category[]> {
   return json<Category[]>(await adminGet('/api/admin/categories'));
 }
 
+/** One file + the YouTube link it plays through — 1:1, unlike category. */
+export interface PublishFile {
+  file: string;
+  youtubeUrl: string;
+}
+
 export async function publish(
-  files: string[],
-  scheduled: ScheduledTrack[],
+  files: PublishFile[],
+  scheduled: (ScheduledTrack & { youtubeUrl: string })[],
   csrfToken: string,
   category: string | null = null,
 ): Promise<void> {
@@ -118,6 +124,17 @@ export async function assignCategory(
 /** Set the display order. `files` must be every published file, in the new order. */
 export async function reorderTracks(files: string[], csrfToken: string): Promise<void> {
   await json<unknown>(await adminPost('/api/admin/tracks/reorder', { files }, csrfToken));
+}
+
+/** Set/fix the YouTube link an already-published track plays through. */
+export async function updateYoutubeUrl(
+  files: string[],
+  youtubeUrl: string,
+  csrfToken: string,
+): Promise<void> {
+  await json<unknown>(
+    await adminPost('/api/admin/tracks/youtube', { files, youtubeUrl }, csrfToken),
+  );
 }
 
 export async function unpublish(filesToDelete: string[], csrfToken: string): Promise<void> {
